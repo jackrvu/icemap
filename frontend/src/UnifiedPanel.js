@@ -34,6 +34,13 @@ function parseCSVLine(line) {
     return result;
 }
 
+// Helper function to decode base64 to UTF-8
+function base64ToUtf8(base64) {
+    const binaryString = atob(base64);
+    const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
+    return new TextDecoder('utf-8').decode(bytes);
+}
+
 function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPanelStateChange }) {
     const [activeTab, setActiveTab] = useState('incidents'); // 'incidents' or 'news'
     const [isPanelMinimized, setIsPanelMinimized] = useState(false);
@@ -238,74 +245,140 @@ function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPane
     // Load news articles
     useEffect(() => {
         const loadArticles = async () => {
+            console.log('🔄 Starting to load articles from API...');
             try {
-                // Load both CSV files
-                const [mediacloudResponse, newsroomResponse] = await Promise.all([
-                    fetch('/mediacloud_articles.csv'),
-                    fetch('/newsroom_reports.csv')
-                ]);
+                // Load articles from the API endpoint instead of local CSV files
+                console.log('📡 Fetching from API endpoint: https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV');
+                const response = await fetch('https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV');
 
-                const mediacloudText = await mediacloudResponse.text();
-                const newsroomText = await newsroomResponse.text();
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                console.log('✅ API response received, status:', response.status);
+                const rawText = await response.text();
+                console.log('📄 Raw response length:', rawText.length, 'characters');
 
-                // Parse mediacloud articles
-                const mediacloudLines = mediacloudText.split('\n');
-                const mediacloudHeaders = parseCSVLine(mediacloudLines[0]);
+                let csvText;
+                try {
+                    console.log('🔍 Attempting to parse as JSON...');
+                    // Try to parse as JSON (API returns JSON with base64 body)
+                    const data = JSON.parse(rawText);
+                    console.log('📊 Parsed JSON data:', {
+                        statusCode: data.statusCode,
+                        isBase64Encoded: data.isBase64Encoded,
+                        bodyLength: data.body ? data.body.length : 0
+                    });
 
-                const mediacloudArticles = mediacloudLines.slice(1).map(line => {
+                    if (data.statusCode !== 200 || !data.isBase64Encoded || !data.body) {
+                        throw new Error('Invalid response format from API');
+                    }
+                    console.log('🔓 Decoding base64 body...');
+                    csvText = base64ToUtf8(data.body);
+                    console.log('📋 Decoded CSV length:', csvText.length, 'characters');
+                } catch (e) {
+                    console.log('⚠️ JSON parsing failed, treating as raw base64:', e.message);
+                    // If not JSON, treat as raw base64-encoded CSV
+                    csvText = base64ToUtf8(rawText.trim());
+                    console.log('📋 Decoded raw CSV length:', csvText.length, 'characters');
+                }
+
+                // Parse CSV with proper handling of quoted fields
+                console.log('🔍 Parsing CSV lines...');
+                const lines = csvText.split('\n');
+                console.log('📊 Total CSV lines:', lines.length);
+
+                if (lines.length === 0) {
+                    throw new Error('No CSV lines found');
+                }
+
+                const headers = parseCSVLine(lines[0]);
+                console.log('📋 CSV headers:', headers);
+
+                const articles = lines.slice(1).map((line, index) => {
                     if (!line.trim()) return null; // Skip empty lines
                     const values = parseCSVLine(line);
                     const article = {};
-                    mediacloudHeaders.forEach((header, index) => {
+                    headers.forEach((header, index) => {
                         article[header.trim()] = values[index] ? values[index].trim() : '';
                     });
+
+                    // Extract latitude and longitude from coordinates field for articles
+                    if (article.coordinates) {
+                        try {
+                            // Parse coordinates string like "{'lat': Decimal('38.8860434'), 'lon': Decimal('-76.999525')}"
+                            const coordMatch = article.coordinates.match(/'lat':\s*Decimal\('([^']+)'\),\s*'lon':\s*Decimal\('([^']+)'\)/);
+                            if (coordMatch) {
+                                article.latitude = coordMatch[1];
+                                article.longitude = coordMatch[2];
+                            } else {
+                                // Try alternative format
+                                const simpleMatch = article.coordinates.match(/lat['"]?\s*:\s*([\d.-]+).*?lon['"]?\s*:\s*([\d.-]+)/);
+                                if (simpleMatch) {
+                                    article.latitude = simpleMatch[1];
+                                    article.longitude = simpleMatch[2];
+                                }
+                            }
+                        } catch (e) {
+                            console.log('⚠️ Failed to parse coordinates for article:', article.coordinates);
+                        }
+                    }
+
                     return {
                         ...article,
-                        source: 'MediaCloud',
-                        url: article.url,
+                        source: 'API',
+                        url: article.url || article.link,
                         title: article.title,
                         date: article.date
                     };
-                }).filter(article => article && article.title && article.url);
+                }).filter(article => {
+                    if (!article) return false;
+                    const hasTitle = article.title && article.title.trim();
+                    const hasUrl = (article.url || article.link) && (article.url || article.link).trim();
+                    return hasTitle && hasUrl;
+                });
 
-                // Parse newsroom articles
-                const newsroomLines = newsroomText.split('\n');
-                const newsroomHeaders = parseCSVLine(newsroomLines[0]);
+                console.log('✅ Successfully parsed articles:', {
+                    totalRecords: articles.length,
+                    sampleRecord: articles[0] || 'No records found'
+                });
 
-                const newsroomArticles = newsroomLines.slice(1).map(line => {
-                    if (!line.trim()) return null; // Skip empty lines
-                    const values = parseCSVLine(line);
-                    const article = {};
-                    newsroomHeaders.forEach((header, index) => {
-                        article[header.trim()] = values[index] ? values[index].trim() : '';
+                // Debug: Show sample coordinates for articles
+                if (articles.length > 0) {
+                    console.log('📍 Sample article coordinates field:', articles[0].coordinates);
+                    console.log('📍 Sample article parsed lat/lng:', {
+                        latitude: articles[0].latitude,
+                        longitude: articles[0].longitude
                     });
-                    return {
-                        ...article,
-                        source: 'Newsroom',
-                        url: article.link,
-                        title: article.title,
-                        date: article.date
-                    };
-                }).filter(article => article && article.title && article.url);
+                }
 
-                // Combine and sort by date (newest first)
-                let combinedArticles = [...mediacloudArticles, ...newsroomArticles]
-                    .sort((a, b) => {
-                        const dateA = new Date(a.date);
-                        const dateB = new Date(b.date);
-                        return dateB - dateA;
-                    });
+                // Sort by date (newest first)
+                const sortedArticles = articles.sort((a, b) => {
+                    const dateA = new Date(a.date);
+                    const dateB = new Date(b.date);
+                    return dateB - dateA;
+                });
 
                 // Deprioritize ice.gov articles: move them to the bottom, but keep date order within each group
-                const nonIceArticles = combinedArticles.filter(article => !(article.url && article.url.includes('ice.gov')));
-                const iceArticles = combinedArticles.filter(article => article.url && article.url.includes('ice.gov'));
-                combinedArticles = [...nonIceArticles, ...iceArticles];
+                const nonIceArticles = sortedArticles.filter(article => !(article.url && article.url.includes('ice.gov')));
+                const iceArticles = sortedArticles.filter(article => article.url && article.url.includes('ice.gov'));
+                const combinedArticles = [...nonIceArticles, ...iceArticles];
+
+                console.log('📊 Final article counts:', {
+                    total: combinedArticles.length,
+                    nonIce: nonIceArticles.length,
+                    ice: iceArticles.length
+                });
 
                 setAllArticles(combinedArticles);
                 setArticles(combinedArticles.slice(0, 20));
                 setLoadingNews(false);
+                console.log('💾 Articles loaded and set in state');
             } catch (error) {
-                console.error('Error loading articles:', error);
+                console.error('❌ Error loading articles:', error);
+                console.error('Error details:', {
+                    message: error.message,
+                    stack: error.stack
+                });
                 setLoadingNews(false);
             }
         };

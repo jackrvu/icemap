@@ -78,7 +78,16 @@ function HeatMapLayer({ arrestData, enabled = true }) {
     const heatLayerRef = useRef(null);
 
     useEffect(() => {
-        if (!arrestData || arrestData.length === 0 || !enabled) return;
+        console.log('🔥 HeatMapLayer processing arrest data:', {
+            arrestDataLength: arrestData ? arrestData.length : 0,
+            enabled: enabled,
+            hasValidData: arrestData && arrestData.length > 0
+        });
+
+        if (!arrestData || arrestData.length === 0 || !enabled) {
+            console.log('🔥 HeatMapLayer: No data or disabled, skipping');
+            return;
+        }
 
         // Convert arrest data to points
         const points = arrestData
@@ -88,6 +97,11 @@ function HeatMapLayer({ arrestData, enabled = true }) {
                 data: arrest
             }))
             .filter(point => !isNaN(point.lat) && !isNaN(point.lng));
+
+        console.log('🔥 HeatMapLayer points processed:', {
+            totalPoints: points.length,
+            samplePoint: points[0] || null
+        });
 
         // Remove existing heat layer
         if (heatLayerRef.current) {
@@ -110,6 +124,7 @@ function HeatMapLayer({ arrestData, enabled = true }) {
             }
         });
 
+        console.log('🔥 HeatMapLayer adding heat layer to map');
         map.addLayer(heatLayerRef.current);
 
         return () => {
@@ -212,6 +227,16 @@ function useIsDesktop(threshold = 900) {
 
 function MapComponent({ arrestData, inspectionData, onCursorMove, onMapClick, onInspectionPinClick, showDetentionPins, onToggleDetentionPins }) {
     const isDesktop = useIsDesktop();
+
+    // Debug logging for arrest data
+    useEffect(() => {
+        console.log('🗺️ MapComponent received arrest data:', {
+            arrestDataLength: arrestData ? arrestData.length : 0,
+            hasArrestData: !!arrestData,
+            sampleArrest: arrestData && arrestData.length > 0 ? arrestData[0] : null
+        });
+    }, [arrestData]);
+
     // Calculate center of the map based on data
     const center = arrestData.length > 0
         ? [
@@ -219,6 +244,12 @@ function MapComponent({ arrestData, inspectionData, onCursorMove, onMapClick, on
             arrestData.reduce((sum, arrest) => sum + parseFloat(arrest.longitude), 0) / arrestData.length
         ]
         : [39.8283, -98.5795]; // Default to center of US
+
+    console.log('🗺️ MapComponent center calculation:', {
+        center: center,
+        arrestDataLength: arrestData.length,
+        hasValidData: arrestData.length > 0
+    });
 
     return (
         <div className="map-container">
