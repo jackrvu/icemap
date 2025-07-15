@@ -212,21 +212,30 @@ function App() {
                     return hasLat && hasLng;
                 });
 
+                // Remove duplicates based on title field
+                const uniqueArrestData = arrestData.filter((arrest, index, self) => {
+                    if (!arrest.title) return true; // Keep records without titles
+                    const firstIndex = self.findIndex(item => item.title === arrest.title);
+                    return index === firstIndex;
+                });
+
                 console.log('✅ Successfully parsed arrest data:', {
                     totalRecords: arrestData.length,
-                    sampleRecord: arrestData[0] || 'No records found'
+                    uniqueRecords: uniqueArrestData.length,
+                    duplicatesRemoved: arrestData.length - uniqueArrestData.length,
+                    sampleRecord: uniqueArrestData[0] || 'No records found'
                 });
 
                 // Debug: Show sample coordinates
-                if (arrestData.length > 0) {
-                    console.log('📍 Sample coordinates field:', arrestData[0].coordinates);
+                if (uniqueArrestData.length > 0) {
+                    console.log('📍 Sample coordinates field:', uniqueArrestData[0].coordinates);
                     console.log('📍 Sample parsed lat/lng:', {
-                        latitude: arrestData[0].latitude,
-                        longitude: arrestData[0].longitude
+                        latitude: uniqueArrestData[0].latitude,
+                        longitude: uniqueArrestData[0].longitude
                     });
                 }
 
-                setArrestData(arrestData);
+                setArrestData(uniqueArrestData);
                 console.log('💾 Arrest data set in state');
             } catch (error) {
                 console.error('❌ Error loading arrest data:', error);

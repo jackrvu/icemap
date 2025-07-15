@@ -337,22 +337,31 @@ function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPane
                     return hasTitle && hasUrl;
                 });
 
+                // Remove duplicates based on title field
+                const uniqueArticles = articles.filter((article, index, self) => {
+                    if (!article.title) return true; // Keep articles without titles
+                    const firstIndex = self.findIndex(item => item.title === article.title);
+                    return index === firstIndex;
+                });
+
                 console.log('✅ Successfully parsed articles:', {
                     totalRecords: articles.length,
-                    sampleRecord: articles[0] || 'No records found'
+                    uniqueRecords: uniqueArticles.length,
+                    duplicatesRemoved: articles.length - uniqueArticles.length,
+                    sampleRecord: uniqueArticles[0] || 'No records found'
                 });
 
                 // Debug: Show sample coordinates for articles
-                if (articles.length > 0) {
-                    console.log('📍 Sample article coordinates field:', articles[0].coordinates);
+                if (uniqueArticles.length > 0) {
+                    console.log('📍 Sample article coordinates field:', uniqueArticles[0].coordinates);
                     console.log('📍 Sample article parsed lat/lng:', {
-                        latitude: articles[0].latitude,
-                        longitude: articles[0].longitude
+                        latitude: uniqueArticles[0].latitude,
+                        longitude: uniqueArticles[0].longitude
                     });
                 }
 
                 // Sort by date (newest first)
-                const sortedArticles = articles.sort((a, b) => {
+                const sortedArticles = uniqueArticles.sort((a, b) => {
                     const dateA = new Date(a.date);
                     const dateB = new Date(b.date);
                     return dateB - dateA;
