@@ -13,6 +13,33 @@ function CountyCaseHeatMap({ enabled = true }) {
     const [caseData, setCaseData] = useState({});
     const geojsonLayerRef = useRef(null);
 
+    // Track if the map is currently moving
+    const [isMapMoving, setIsMapMoving] = useState(false);
+
+    useEffect(() => {
+        if (!map) return;
+        const handleMoveStart = () => setIsMapMoving(true);
+        const handleMoveEnd = () => setIsMapMoving(false);
+        map.on('movestart', handleMoveStart);
+        map.on('moveend', handleMoveEnd);
+        // Removed zoomstart/zoomend handlers to fix zooming
+        return () => {
+            map.off('movestart', handleMoveStart);
+            map.off('moveend', handleMoveEnd);
+        };
+    }, [map]);
+
+    // Helper to close all tooltips for all county layers
+    const closeAllTooltips = useCallback(() => {
+        if (geojsonLayerRef.current) {
+            geojsonLayerRef.current.eachLayer(layer => {
+                if (layer.closeTooltip) {
+                    layer.closeTooltip();
+                }
+            });
+        }
+    }, []);
+
     // Memoize the color scale to prevent recreation on every render
     const colorScale = useMemo(() => {
         if (!Object.keys(caseData).length) return null;
@@ -135,14 +162,15 @@ function CountyCaseHeatMap({ enabled = true }) {
                     l.bringToFront();
                 }
 
-                // Open the tooltip on hover
-                layer.openTooltip();
+                // Only show the tooltip if the map is not moving
+                if (!isMapMoving) {
+                    layer.openTooltip();
+                }
             },
             mouseout: function (e) {
                 geojsonLayerRef.current.resetStyle(e.target);
-
-                // Close the tooltip on mouseout
-                setTimeout(() => layer.closeTooltip(), 300);
+                // Close all tooltips on mouseout
+                closeAllTooltips();
             },
             click: function (e) {
                 // Completely prevent any click functionality
@@ -161,7 +189,13 @@ function CountyCaseHeatMap({ enabled = true }) {
                 return false; // Prevent further event propagation
             }
         });
-    }, [caseData]);
+    }, [caseData, closeAllTooltips, isMapMoving]);
+
+    // Memoize the style function and onEachFeatureFunction refs to avoid unnecessary re-creation
+    const styleFunctionRef = useRef();
+    const onEachFeatureFunctionRef = useRef();
+    styleFunctionRef.current = styleFunction;
+    onEachFeatureFunctionRef.current = onEachFeatureFunction;
 
     useEffect(() => {
         // Load the US counties GeoJSON
@@ -261,9 +295,9 @@ function CountyCaseHeatMap({ enabled = true }) {
 
         // Create GeoJSON layer
         geojsonLayerRef.current = L.geoJSON(countyData, {
-            style: styleFunction,
+            style: styleFunctionRef.current,
             interactive: true, // Re-enable interactions for hover events
-            onEachFeature: onEachFeatureFunction
+            onEachFeature: onEachFeatureFunctionRef.current
         });
 
         // Add the layer to the map
@@ -289,7 +323,25 @@ function CountyCaseHeatMap({ enabled = true }) {
             }
         };
 
-    }, [countyData, caseData, enabled, styleFunction, onEachFeatureFunction]); // Remove map dependency
+    }, [countyData, caseData, enabled]); // Only depend on data and enabled
+
+    // Add this effect to close all tooltips on drag or mousedown
+    useEffect(() => {
+        if (!geojsonLayerRef.current || !map) return;
+
+        map.on('mousedown', closeAllTooltips);
+        map.on('dragstart', closeAllTooltips);
+
+        // Also close all tooltips when mouse leaves the map container
+        const container = map.getContainer();
+        container.addEventListener('mouseleave', closeAllTooltips);
+
+        return () => {
+            map.off('mousedown', closeAllTooltips);
+            map.off('dragstart', closeAllTooltips);
+            container.removeEventListener('mouseleave', closeAllTooltips);
+        };
+    }, [map, geojsonLayerRef.current, closeAllTooltips]);
 
     return null;
 }

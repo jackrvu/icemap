@@ -526,7 +526,6 @@ function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPane
                     aria-label="Restore panel"
                 >
                     <span className="restore-icon">▲</span>
-                    <span className="restore-text">Panel</span>
                 </button>
             )}
 

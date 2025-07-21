@@ -83,7 +83,7 @@ function App() {
     const [cursorPosition, setCursorPosition] = useState(null);
     const [mapClickCount, setMapClickCount] = useState(0);
     const [isMobile, setIsMobile] = useState(false);
-    const [showDetentionPins, setShowDetentionPins] = useState(true);
+    const [showDetentionPins, setShowDetentionPins] = useState(() => !isMobileDevice());
     const [isPanelMinimized, setIsPanelMinimized] = useState(false);
     const [dataLoadingStatus, setDataLoadingStatus] = useState({
         arrestData: false,
