@@ -51,7 +51,6 @@ function CityMarkers({ enabled = true }) {
                 }
                 const data = await response.json();
                 setCitySummaries(data);
-                console.log('Loaded pre-generated city summaries', Object.keys(data).length);
             } catch (error) {
                 console.error('Error loading city summaries:', error);
             } finally {
@@ -132,7 +131,6 @@ function CityMarkers({ enabled = true }) {
                 
                 // Set up the click handler to fetch and display the city summary
                 marker.on('click', async () => {
-                    console.log('City marker clicked:', city.name);
                     
                     // Show loading popup immediately
                     popup.setLatLng([city.lat, city.lng])

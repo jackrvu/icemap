@@ -1,47 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import './UnifiedPanel.css';
 
-// Helper function to properly parse CSV lines with quoted fields
-function parseCSVLine(line) {
-    const result = [];
-    let current = '';
-    let inQuotes = false;
-
-    for (let i = 0; i < line.length; i++) {
-        const char = line[i];
-
-        if (char === '"') {
-            if (inQuotes && line[i + 1] === '"') {
-                // Escaped quote
-                current += '"';
-                i++; // Skip next quote
-            } else {
-                // Toggle quote state
-                inQuotes = !inQuotes;
-            }
-        } else if (char === ',' && !inQuotes) {
-            // End of field
-            result.push(current.trim());
-            current = '';
-        } else {
-            current += char;
-        }
-    }
-
-    // Add the last field
-    result.push(current.trim());
-
-    return result;
-}
-
-// Helper function to decode base64 to UTF-8
-function base64ToUtf8(base64) {
-    const binaryString = atob(base64);
-    const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
-    return new TextDecoder('utf-8').decode(bytes);
-}
-
-function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPanelStateChange }) {
+function UnifiedPanel({ cursorPosition, arrestData, loadingData, onMapClick, isMobile, onPanelStateChange }) {
     const [activeTab, setActiveTab] = useState('incidents'); // 'incidents' or 'news'
     const [isPanelMinimized, setIsPanelMinimized] = useState(false);
     const [touchStartY, setTouchStartY] = useState(null);
@@ -55,10 +15,7 @@ function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPane
     const [isPersistent, setIsPersistent] = useState(false);
     const [lastClickCount, setLastClickCount] = useState(0);
 
-    // News state
-    const [articles, setArticles] = useState([]);
-    const [loadingNews, setLoadingNews] = useState(true);
-    const [allArticles, setAllArticles] = useState([]);
+    // News state — derived from arrestData prop, no separate fetch needed
     const [displayedArticleCount, setDisplayedArticleCount] = useState(20);
     const [loadingMoreArticles, setLoadingMoreArticles] = useState(false);
     const [currentTime, setCurrentTime] = useState(new Date());
@@ -242,158 +199,17 @@ function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPane
         setLastClickCount(onMapClick);
     }, [onMapClick, nearbyIncidents, isPersistent, lastClickCount, isPanelMinimized]);
 
-    // Load news articles
-    useEffect(() => {
-        const loadArticles = async () => {
-            console.log('🔄 Starting to load articles from API...');
-            try {
-                // Load articles from the API endpoint instead of local CSV files
-                console.log('📡 Fetching from API endpoint: https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV');
-                const response = await fetch('https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV');
+    // Derive sorted news articles from arrestData prop (no second API call needed)
+    const allArticles = useMemo(() => {
+        if (!arrestData || arrestData.length === 0) return [];
+        const sorted = [...arrestData].sort((a, b) => new Date(b.date) - new Date(a.date));
+        const nonIce = sorted.filter(a => !(a.url && a.url.includes('ice.gov')));
+        const ice = sorted.filter(a => a.url && a.url.includes('ice.gov'));
+        return [...nonIce, ...ice];
+    }, [arrestData]);
 
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                console.log('✅ API response received, status:', response.status);
-                const rawText = await response.text();
-                console.log('📄 Raw response length:', rawText.length, 'characters');
-
-                let csvText;
-                try {
-                    console.log('🔍 Attempting to parse as JSON...');
-                    // Try to parse as JSON (API returns JSON with base64 body)
-                    const data = JSON.parse(rawText);
-                    console.log('📊 Parsed JSON data:', {
-                        statusCode: data.statusCode,
-                        isBase64Encoded: data.isBase64Encoded,
-                        bodyLength: data.body ? data.body.length : 0
-                    });
-
-                    if (data.statusCode !== 200 || !data.isBase64Encoded || !data.body) {
-                        throw new Error('Invalid response format from API');
-                    }
-                    console.log('🔓 Decoding base64 body...');
-                    csvText = base64ToUtf8(data.body);
-                    console.log('📋 Decoded CSV length:', csvText.length, 'characters');
-                } catch (e) {
-                    console.log('⚠️ JSON parsing failed, treating as raw base64:', e.message);
-                    // If not JSON, treat as raw base64-encoded CSV
-                    csvText = base64ToUtf8(rawText.trim());
-                    console.log('📋 Decoded raw CSV length:', csvText.length, 'characters');
-                }
-
-                // Parse CSV with proper handling of quoted fields
-                console.log('🔍 Parsing CSV lines...');
-                const lines = csvText.split('\n');
-                console.log('📊 Total CSV lines:', lines.length);
-
-                if (lines.length === 0) {
-                    throw new Error('No CSV lines found');
-                }
-
-                const headers = parseCSVLine(lines[0]);
-                console.log('📋 CSV headers:', headers);
-
-                const articles = lines.slice(1).map((line, index) => {
-                    if (!line.trim()) return null; // Skip empty lines
-                    const values = parseCSVLine(line);
-                    const article = {};
-                    headers.forEach((header, index) => {
-                        article[header.trim()] = values[index] ? values[index].trim() : '';
-                    });
-
-                    // Extract latitude and longitude from coordinates field for articles
-                    if (article.coordinates) {
-                        try {
-                            // Parse coordinates string like "{'lat': Decimal('38.8860434'), 'lon': Decimal('-76.999525')}"
-                            const coordMatch = article.coordinates.match(/'lat':\s*Decimal\('([^']+)'\),\s*'lon':\s*Decimal\('([^']+)'\)/);
-                            if (coordMatch) {
-                                article.latitude = coordMatch[1];
-                                article.longitude = coordMatch[2];
-                            } else {
-                                // Try alternative format
-                                const simpleMatch = article.coordinates.match(/lat['"]?\s*:\s*([\d.-]+).*?lon['"]?\s*:\s*([\d.-]+)/);
-                                if (simpleMatch) {
-                                    article.latitude = simpleMatch[1];
-                                    article.longitude = simpleMatch[2];
-                                }
-                            }
-                        } catch (e) {
-                            console.log('⚠️ Failed to parse coordinates for article:', article.coordinates);
-                        }
-                    }
-
-                    return {
-                        ...article,
-                        source: 'API',
-                        url: article.url || article.link,
-                        title: article.title,
-                        date: article.date
-                    };
-                }).filter(article => {
-                    if (!article) return false;
-                    const hasTitle = article.title && article.title.trim();
-                    const hasUrl = (article.url || article.link) && (article.url || article.link).trim();
-                    return hasTitle && hasUrl;
-                });
-
-                // Remove duplicates based on title field
-                const uniqueArticles = articles.filter((article, index, self) => {
-                    if (!article.title) return true; // Keep articles without titles
-                    const firstIndex = self.findIndex(item => item.title === article.title);
-                    return index === firstIndex;
-                });
-
-                console.log('✅ Successfully parsed articles:', {
-                    totalRecords: articles.length,
-                    uniqueRecords: uniqueArticles.length,
-                    duplicatesRemoved: articles.length - uniqueArticles.length,
-                    sampleRecord: uniqueArticles[0] || 'No records found'
-                });
-
-                // Debug: Show sample coordinates for articles
-                if (uniqueArticles.length > 0) {
-                    console.log('📍 Sample article coordinates field:', uniqueArticles[0].coordinates);
-                    console.log('📍 Sample article parsed lat/lng:', {
-                        latitude: uniqueArticles[0].latitude,
-                        longitude: uniqueArticles[0].longitude
-                    });
-                }
-
-                // Sort by date (newest first)
-                const sortedArticles = uniqueArticles.sort((a, b) => {
-                    const dateA = new Date(a.date);
-                    const dateB = new Date(b.date);
-                    return dateB - dateA;
-                });
-
-                // Deprioritize ice.gov articles: move them to the bottom, but keep date order within each group
-                const nonIceArticles = sortedArticles.filter(article => !(article.url && article.url.includes('ice.gov')));
-                const iceArticles = sortedArticles.filter(article => article.url && article.url.includes('ice.gov'));
-                const combinedArticles = [...nonIceArticles, ...iceArticles];
-
-                console.log('📊 Final article counts:', {
-                    total: combinedArticles.length,
-                    nonIce: nonIceArticles.length,
-                    ice: iceArticles.length
-                });
-
-                setAllArticles(combinedArticles);
-                setArticles(combinedArticles.slice(0, 20));
-                setLoadingNews(false);
-                console.log('💾 Articles loaded and set in state');
-            } catch (error) {
-                console.error('❌ Error loading articles:', error);
-                console.error('Error details:', {
-                    message: error.message,
-                    stack: error.stack
-                });
-                setLoadingNews(false);
-            }
-        };
-
-        loadArticles();
-    }, []);
+    const articles = allArticles.slice(0, displayedArticleCount);
+    const loadingNews = loadingData;
 
     // Use persistent incidents if available, otherwise use nearby incidents
     const currentIncidents = isPersistent ? persistentIncidents : nearbyIncidents;
@@ -412,7 +228,6 @@ function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPane
         setLoadingMoreIncidents(true);
         await new Promise(resolve => setTimeout(resolve, 300));
 
-        const nextBatch = currentIncidents.slice(displayedIncidentCount, displayedIncidentCount + 20);
         setDisplayedIncidentCount(prev => prev + 20);
         setLoadingMoreIncidents(false);
     };
@@ -423,12 +238,6 @@ function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPane
         setLoadingMoreArticles(true);
         await new Promise(resolve => setTimeout(resolve, 300));
 
-        // Always apply deprioritization when loading more
-        const nonIceArticles = allArticles.filter(article => !(article.url && article.url.includes('ice.gov')));
-        const iceArticles = allArticles.filter(article => article.url && article.url.includes('ice.gov'));
-        const sortedArticles = [...nonIceArticles, ...iceArticles];
-        const nextBatch = sortedArticles.slice(displayedArticleCount, displayedArticleCount + 20);
-        setArticles(prev => [...prev, ...nextBatch]);
         setDisplayedArticleCount(prev => prev + 20);
         setLoadingMoreArticles(false);
     };
@@ -572,6 +381,9 @@ function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPane
                                 onClick={() => handleTabSwitch('news')}
                             >
                                 {isMobile ? 'Feed' : 'Live News Feed'}
+                                {allArticles.length > 0 && (
+                                    <span className="tab-count">{allArticles.length}</span>
+                                )}
                             </button>
                         </div>
                     </div>
@@ -627,11 +439,22 @@ function UnifiedPanel({ cursorPosition, arrestData, onMapClick, isMobile, onPane
                                 <div className="loading">Loading news...</div>
                             ) : (
                                 <div className="articles-list" ref={articlesListRef}>
+                                    {articles.length === 0 && (
+                                        <div className="incidents-placeholder">
+                                            <h4>No Articles Yet</h4>
+                                            <p className="placeholder-text">Articles will appear as they are processed.</p>
+                                        </div>
+                                    )}
                                     {articles.map((article, index) => (
                                         <div key={index} className="article-item">
                                             <div className="article-header">
                                                 {formatDate(article.date) && (
                                                     <span className="article-date">{formatDate(article.date)}</span>
+                                                )}
+                                                {article.category && article.category !== 'unknown' && (
+                                                    <span className={`article-category category-${article.category}`}>
+                                                        {article.category}
+                                                    </span>
                                                 )}
                                             </div>
                                             <a

@@ -215,6 +215,22 @@
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
+.tab-count {
+    display: inline-block;
+    background: #444;
+    color: #aaa;
+    font-size: 0.65rem;
+    border-radius: 10px;
+    padding: 1px 5px;
+    margin-left: 5px;
+    font-weight: normal;
+}
+
+.tab-button.active .tab-count {
+    background: #666;
+    color: #fff;
+}
+
 /* Mobile tab buttons */
 .unified-panel.mobile .tab-button {
     padding: 0.3rem 0.8rem;
@@ -509,6 +525,23 @@
 .unified-panel.mobile .article-date {
     font-size: 0.65rem;
 }
+
+.article-category {
+    font-size: 0.65rem;
+    padding: 1px 5px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    margin-left: 6px;
+}
+
+.category-raid    { background: #7f1d1d; color: #fca5a5; }
+.category-arrest  { background: #78350f; color: #fcd34d; }
+.category-detention { background: #1e3a5f; color: #93c5fd; }
+.category-protest { background: #14532d; color: #86efac; }
+.category-policy  { background: #312e81; color: #c4b5fd; }
+.category-opinion { background: #374151; color: #d1d5db; }
 
 .article-title {
     font-size: 0.9rem;

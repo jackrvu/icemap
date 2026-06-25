@@ -2,14 +2,9 @@ import React from 'react';
 import './Sidebar.css';
 
 function Sidebar({ isOpen, incidents, onClose }) {
-    console.log('Sidebar render - isOpen:', isOpen, 'incidents:', incidents ? incidents.length : 0); // Debug log
-
     if (!isOpen || !incidents || incidents.length === 0) {
-        console.log('Sidebar not rendering - conditions not met'); // Debug log
         return null;
     }
-
-    console.log('Sidebar rendering with', incidents.length, 'incidents'); // Debug log
 
     return (
         <div className={`sidebar ${isOpen ? 'sidebar-open' : ''}`}>

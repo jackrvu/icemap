@@ -21,6 +21,7 @@ import os
 import requests
 import time
 from datetime import datetime
+from functools import lru_cache
 from typing import Callable, Iterable, Optional, Literal
 from newspaper import Article
 from fastapi import FastAPI, HTTPException
@@ -44,9 +45,9 @@ app = FastAPI(
 MCP_TYPE = "application/vnd.mcp.v1+json"
 MCP_CTX  = "https://example.org/mcp"
 
-# DeepSeek API configuration
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+# OpenAI API configuration (Responses API)
+OPENAI_API_URL = "https://api.openai.com/v1/responses"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 ARTICLES_API = os.getenv("ARTICLES_API")        # e.g. https://abcd1234.execute-api.us-east-1.amazonaws.com/prod/article
 ARTICLES_API_KEY = os.getenv("ARTICLES_API_KEY")  # API key for the articles endpoint
@@ -70,12 +71,84 @@ ToolFunc        = Callable[..., object]
 ArticlePayload  = dict[str, object]
 
 # Each real tool can be swapped in via DI / import-string look-up later.
+
+def _openai_text(
+    prompt: str,
+    *,
+    max_output_tokens: int,
+    temperature: float = 0.1,
+    timeout: int = 30,
+    json_mode: bool = False,
+) -> str:
+    """
+    Minimal OpenAI Responses API wrapper for gpt-5-nano.
+    Returns the model's text output (or "" on failure).
+    """
+    if not OPENAI_API_KEY:
+        return ""
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    data: dict = {
+        "model": "gpt-5-nano",
+        "input": prompt,
+        # Note: temperature is not supported with gpt-5-nano
+        "max_output_tokens": max_output_tokens,
+        # Use minimal reasoning effort for gpt-5-nano (supported values: minimal, low, medium, high)
+        "reasoning": {"effort": "minimal"},
+    }
+
+    # For JSON extraction tasks, request JSON mode (you already mention "JSON" in the prompt)
+    if json_mode:
+        data["text"] = {"format": {"type": "json_object"}}
+
+    try:
+        resp = requests.post(OPENAI_API_URL, headers=headers, json=data, timeout=timeout)
+        
+        # Check for HTTP errors before parsing
+        if not resp.ok:
+            return ""
+        
+        resp.raise_for_status()
+        result = resp.json()
+
+        # Preferred convenience field (when present)
+        ot = result.get("output_text")
+        if isinstance(ot, str) and ot.strip():
+            return ot.strip()
+
+        # Standard Responses shape
+        chunks: list[str] = []
+        for item in result.get("output", []) or []:
+            if item.get("type") == "message":
+                for c in item.get("content", []) or []:
+                    if c.get("type") in ("output_text", "text"):
+                        t = c.get("text")
+                        if isinstance(t, str) and t:
+                            chunks.append(t)
+        if chunks:
+            return "".join(chunks).strip()
+
+        # Back-compat fallback if some gateway returns chat-completions shape
+        if "choices" in result:
+            return (result["choices"][0]["message"]["content"] or "").strip()
+
+    except requests.exceptions.RequestException:
+        return ""
+    except Exception:
+        return ""
+
+    return ""
+
 def parseAddressInfo(payload: ArticlePayload) -> ArticlePayload:
     """Extract address and location information from article text."""
     if "text" not in payload or not payload["text"]:
         return payload
         
-    if not DEEPSEEK_API_KEY:
+    if not OPENAI_API_KEY:
         return payload
         
     prompt = """Extract location information from this article text. Return a JSON object with these fields:
@@ -89,29 +162,14 @@ Article text: {text}
 
 Return only valid JSON:"""
 
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt.format(text=payload["text"][:1500])  # Limit text length
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 200
-    }
-    
     try:
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data, timeout=30)
-        response.raise_for_status()
-        
-        result = response.json()
-        content = result["choices"][0]["message"]["content"].strip()
+        content = _openai_text(
+            prompt.format(text=payload["text"][:1500]),
+            max_output_tokens=200,
+            temperature=0.1,
+            timeout=30,
+            json_mode=True,
+        )
         
         # Try to parse JSON response
         try:
@@ -149,44 +207,70 @@ Return only valid JSON:"""
     return payload
 
 def addPublisher(url: str) -> str:
-    """Return canonical publisher string using DeepSeek."""
-    if not DEEPSEEK_API_KEY:
-        return "Unknown Publisher"
+    """Return canonical publisher string using OpenAI API, with URL parsing fallback."""
+    # Fallback: Extract publisher from URL domain if API fails
+    def extract_from_url(url_str: str) -> str:
+        """Extract publisher name from URL domain."""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url_str)
+            netloc = parsed.netloc
+            # Remove www. prefix if present
+            if netloc.startswith("www."):
+                netloc = netloc[4:]
+            # Remove port if present
+            netloc = netloc.split(":")[0]
+            # Capitalize first letter of each word
+            parts = netloc.split(".")
+            if len(parts) > 0:
+                domain = parts[0]
+                return domain.capitalize() if domain else "Unknown Publisher"
+            return "Unknown Publisher"
+        except Exception:
+            return "Unknown Publisher"
+    
+    if not OPENAI_API_KEY:
+        return extract_from_url(url)
         
-    prompt = "Extract publisher name from URL. Return ONLY the publisher name, no other text: {url}"
-    
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt.format(url=url)
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 15
-    }
+    prompt = """Extract the publisher name from this URL. Return ONLY the publisher name, nothing else, no quotes, no explanation, just the name.
+
+URL: {url}
+
+Publisher name:"""
     
     try:
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data, timeout=30)
-        response.raise_for_status()
+        publisher = _openai_text(
+            prompt.format(url=url),
+            max_output_tokens=20,
+            temperature=0.1,
+            timeout=30,
+        ).strip()
         
-        result = response.json()
-        publisher = result["choices"][0]["message"]["content"].strip()
+        # Clean up the response - remove quotes, extra whitespace, etc.
+        if publisher:
+            publisher = publisher.strip('"\'.,;:')
+            publisher = publisher.strip()
+            # If the response looks like it contains extra text, try to extract just the name
+            # Split by common separators and take the first meaningful part
+            for sep in ['\n', ':', '-', '—', 'Publisher', 'publisher']:
+                if sep in publisher:
+                    parts = publisher.split(sep)
+                    publisher = parts[0].strip('"\'.,;: ').strip()
+                    if publisher:
+                        break
         
-        return publisher if publisher else "Unknown Publisher"
+        if publisher and len(publisher) > 0 and len(publisher) < 100:  # Reasonable length check
+            return publisher
+        
+        # If API returned empty or invalid, fall back to URL parsing
+        return extract_from_url(url)
         
     except Exception:
-        return "Unknown Publisher"
+        return extract_from_url(url)
 
 def categorize(text: str) -> str:
     """Return article category label using DeepSeek classification."""
-    if not DEEPSEEK_API_KEY:
+    if not OPENAI_API_KEY:
         # If no API key, fail safe by returning unknown
         return "unknown"
         
@@ -206,29 +290,13 @@ def categorize(text: str) -> str:
 
     Respond with ONLY the category name (raid, arrest, detention, protest, policy, opinion, or unknown):"""
 
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt.format(text=text[:2000])  # Limit text length to avoid token limits
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 20
-    }
-    
     try:
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data, timeout=60)
-        response.raise_for_status()
-        
-        result = response.json()
-        content = result["choices"][0]["message"]["content"].strip().lower()
+        content = _openai_text(
+            prompt.format(text=text[:2000]),
+            max_output_tokens=20,
+            temperature=0.1,
+            timeout=60,
+        ).strip().lower()
         
         # Validate the response is one of our expected categories
         valid_categories = {"raid", "arrest", "detention", "protest", "policy", "opinion", "unknown"}
@@ -247,49 +315,31 @@ def categorize(text: str) -> str:
 
 def extractAddressFromText(text: str) -> Optional[str]:
     """Extract the most specific address/location from article text using DeepSeek."""
-    if not DEEPSEEK_API_KEY:
+    if not OPENAI_API_KEY:
         return None
         
     prompt = """Extract the most specific location mentioned in this text. Return only the location name (city, address, or landmark): {text}. Return ONLY The location information, no other text. If there is no specific location mentioned (like national policy news), return "None"."""
     
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt.format(text=text[:1000])  # Limit text length
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 50
-    }
-    
     try:
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data, timeout=30)
-        response.raise_for_status()
+        location_query = _openai_text(
+            prompt.format(text=text[:1000]),
+            max_output_tokens=50,
+            temperature=0.1,
+            timeout=30,
+        ).strip()
         
-        result = response.json()
-        location_query = result["choices"][0]["message"]["content"].strip()
-        
-        # Check if DeepSeek returned "None" or similar
+        # Check if returned "None" or similar
         if not location_query or location_query.lower() in ["none", "unknown", "not mentioned", "no location", "n/a"]:
-            print("No specific location found and not national policy news")
             return None
             
         return location_query
             
-    except Exception as e:
-        print(f"Error extracting address: {e}")
+    except Exception:
         return None
 
 def sanitize_address(address: str, article_text: str = "") -> str:
     """Clean and clarify address information using DeepSeek before geocoding."""
-    if not DEEPSEEK_API_KEY:
+    if not OPENAI_API_KEY:
         return address
         
     if not address:
@@ -311,41 +361,22 @@ Article context: {context}
 
 Return ONLY the clarified address, no other text. If the location is already clear and specific, return it as-is."""
 
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt.format(
-                    address=address,
-                    context=article_text[:500] if article_text else "No additional context"
-                )
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 100
-    }
-    
     try:
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data, timeout=30)
-        response.raise_for_status()
-        
-        result = response.json()
-        sanitized_address = result["choices"][0]["message"]["content"].strip()
+        sanitized_address = _openai_text(
+            prompt.format(
+                address=address,
+                context=article_text[:500] if article_text else "No additional context",
+            ),
+            max_output_tokens=100,
+            temperature=0.1,
+            timeout=30,
+        ).strip()
         
         # Remove quotes if present
         sanitized_address = sanitized_address.strip('"\'')
-        
-        print(f"Address sanitization: '{address}' → '{sanitized_address}'")
         return sanitized_address
         
-    except Exception as e:
-        print(f"Error sanitizing address '{address}': {e}")
+    except Exception:
         return address
 
 def geoTag(address: str) -> Optional[tuple[float, float]]:
@@ -374,16 +405,10 @@ def geoTag(address: str) -> Optional[tuple[float, float]]:
         if places_data.get("status") == "OK" and places_data.get("candidates"):
             candidate = places_data["candidates"][0]
             location = candidate["geometry"]["location"]
-            returned_address = candidate.get("formatted_address", "")
-            
-            # Simple confidence check based on input length
-            confidence = "high" if len(address) >= 5 else "low"
-            print(f"Geocoding {confidence} confidence: input='{address}' -> returned='{returned_address}'")
-            
             return (location["lat"], location["lng"])
             
-    except Exception as e:
-        print(f"Geocoding error for '{address}': {e}")
+    except Exception:
+        pass
     
     return None
 
@@ -396,7 +421,7 @@ def getText(url: str) -> str:
 
 def judgeRelevance(text: str) -> bool:
     """True iff article is ICE-relevant."""
-    if not DEEPSEEK_API_KEY:
+    if not OPENAI_API_KEY:
         # If no API key, fail safe by returning false
         return False
         
@@ -408,35 +433,20 @@ def judgeRelevance(text: str) -> bool:
 
     Response (true/false only):"""
 
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt.format(text=text)
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 50
-    }
-    
     try:
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data, timeout=60)
-        response.raise_for_status()
-        
-        result = response.json()
-        content = result["choices"][0]["message"]["content"].strip()
+        content = _openai_text(
+            prompt.format(text=text),
+            max_output_tokens=50,
+            temperature=0.1,
+            timeout=60,
+        ).strip()
         
         # Extract just true/false and handle case
-        result = content.lower()
-        if result == "true":
+        result_lower = content.lower()
+        
+        if result_lower == "true":
             return True
-        elif result == "false": 
+        elif result_lower == "false": 
             return False
         else:
             # If response isn't clearly true/false, assume false
@@ -466,8 +476,6 @@ def getUnprocessedArticles() -> str:
         json_data = response.json()
         if json_data.get("statusCode") == 200:
             csv_data = json_data.get("body", "")
-            print(f"API Response Status: {json_data.get('statusCode')}")
-            print(f"API Response Headers: {json_data.get('headers', {})}")
             return csv_data
         else:
             raise RuntimeError(f"API returned status code: {json_data.get('statusCode')}")
@@ -509,6 +517,57 @@ def addArticle(payload: ArticlePayload) -> None:
     if not resp.ok:
         # log & raise so caller can decide to retry / DLQ
         raise RuntimeError(f"putArticle failed → {resp.status_code}: {resp.text}")
+
+# ---------------------------------------------------------------------------
+# ─────────────────────  PERFORMANCE OPTIMIZATIONS  ─────────────────────────
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=2048)
+def fast_getText(url: str) -> str:
+    """Cached wrapper around getText to avoid re-downloading the same URL."""
+    return getText(url)
+
+
+@lru_cache(maxsize=4096)
+def fast_judgeRelevance(text: str) -> bool:
+    """Cached wrapper around judgeRelevance for identical article texts."""
+    return judgeRelevance(text)
+
+
+@lru_cache(maxsize=4096)
+def fast_categorize(text: str) -> str:
+    """Cached wrapper around categorize for identical article texts."""
+    return categorize(text)
+
+
+@lru_cache(maxsize=4096)
+def fast_extractAddressFromText(text: str) -> Optional[str]:
+    """Cached wrapper around extractAddressFromText for identical article texts."""
+    return extractAddressFromText(text)
+
+
+@lru_cache(maxsize=4096)
+def fast_sanitize_address(address: str, article_text: str = "") -> str:
+    """
+    Cached wrapper around sanitize_address.
+
+    Note: article_text participates in the cache key; identical (address, text)
+    pairs will reuse sanitization results, but different texts for the same
+    address will still be handled independently.
+    """
+    return sanitize_address(address, article_text)
+
+
+@lru_cache(maxsize=4096)
+def fast_geoTag(address: str) -> Optional[tuple[float, float]]:
+    """Cached wrapper around geoTag so we don't geocode the same address twice."""
+    return geoTag(address)
+
+
+@lru_cache(maxsize=4096)
+def fast_addPublisher(url: str) -> str:
+    """Cached wrapper around addPublisher for repeated domains/URLs."""
+    return addPublisher(url)
 
 # ---------------------------------------------------------------------------
 # ──────────────────────────  DATA MODELS  ──────────────────────────────────
@@ -584,13 +643,13 @@ def process_csv_articles(
     max_articles: int = 10,
     *,
     # Inject the tool chain so tests can monkey-patch
-    fetch_text: ToolFunc = getText,
-    relevance:  ToolFunc = judgeRelevance,
-    extract_addr: ToolFunc = extractAddressFromText,
-    sanitize_addr: ToolFunc = sanitize_address,
-    tag_coords: ToolFunc = geoTag,
-    classify:   ToolFunc = categorize,
-    canonical_pub: ToolFunc = addPublisher,
+    fetch_text: ToolFunc = fast_getText,
+    relevance:  ToolFunc = fast_judgeRelevance,
+    extract_addr: ToolFunc = fast_extractAddressFromText,
+    sanitize_addr: ToolFunc = fast_sanitize_address,
+    tag_coords: ToolFunc = fast_geoTag,
+    classify:   ToolFunc = fast_categorize,
+    canonical_pub: ToolFunc = fast_addPublisher,
     enrich_addr: ToolFunc = parseAddressInfo,
     sufficiency: ToolFunc = judgeEntrySufficiency,
     persist: ToolFunc = addArticle,
@@ -598,83 +657,50 @@ def process_csv_articles(
     """Process articles from CSV file with live status reporting."""
     accepted = ignored = 0
     
-    print(f"Starting ICE Agent - Processing first {max_articles} articles from CSV")
-    print(f"Reading from: {CSV_FILE_PATH}")
-    print("=" * 80)
-    
     # Read articles from CSV
     records = read_csv_file(CSV_FILE_PATH, max_articles)
     
     if not records:
-        print("No articles found in CSV file")
         return 0, 0
     
-    print(f"Found {len(records)} articles to process")
-    print("=" * 80)
-    
     for i, rec in enumerate(records, 1):
-        print(f"\n{'='*60}")
-        print(f"Processing article {i}/{len(records)}")
-        print(f"Title: {rec.title}")
-        print(f"Date: {rec.date}")
-        print(f"URL: {rec.url}")
-        print(f"{'='*60}")
-        
         try:
             # Step 1: Fetch article text
-            print("Fetching article text...")
             text = fetch_text(rec.url)
             if not text:
-                print("Failed to fetch article text")
+                print(f"✗ [{i}/{len(records)}] Skipped: Failed to fetch text - {rec.title[:50]}")
                 ignored += 1
                 continue
-            
-            # Show first 200 characters of text
-            text_preview = text[:200].replace('\n', ' ').strip()
-            print(f"Article text preview: {text_preview}...")
-            print(f"Text length: {len(text)} characters")
             
             # Step 2: Check relevance
-            print("\nChecking relevance...")
             is_relevant = relevance(text)
             if not is_relevant:
-                print("Article not relevant to ICE")
+                print(f"✗ [{i}/{len(records)}] Skipped: Not ICE-relevant - {rec.title[:50]}")
                 ignored += 1
                 continue
-            print("Article is ICE-relevant")
             
             # Step 3: Extract address information
-            print("\nExtracting address information...")
             address = extract_addr(text)
             if not address:
-                print("Could not extract address information")
+                print(f"✗ [{i}/{len(records)}] Skipped: No address found - {rec.title[:50]}")
                 ignored += 1
                 continue
-            print(f"Extracted address: {address}")
             
             # Step 4: Sanitize address
-            print("\nSanitizing address...")
             sanitized_address = sanitize_addr(address, text)
-            print(f"Sanitized address: {sanitized_address}")
             
             # Step 5: Get coordinates from address
-            print(f"\nGetting coordinates for: {sanitized_address}")
             coords = tag_coords(sanitized_address)
             if not coords:
-                print("Could not extract coordinates from address")
+                print(f"✗ [{i}/{len(records)}] Skipped: No coordinates - {rec.title[:50]}")
                 ignored += 1
                 continue
-            print(f"Coordinates: {coords[0]:.6f}, {coords[1]:.6f}")
             
             # Step 6: Categorize
-            print("\nCategorizing article...")
             category = classify(text)
-            print(f"Category: {category}")
             
             # Step 7: Get publisher
-            print("\nExtracting publisher...")
             publisher = canonical_pub(rec.url)
-            print(f"Publisher: {publisher}")
             
             # Step 8: Build payload
             payload: ArticlePayload = {
@@ -685,85 +711,44 @@ def process_csv_articles(
                 "coordinates": {"lat": coords[0], "lon": coords[1]},
                 "category":   category,
                 "publisher":  publisher,
-                "address":    sanitized_address,  # Store the sanitized address
+                "address":    sanitized_address,
             }
 
             # Enrich with parsed location information
             payload = enrich_addr(payload)
-
-            # Show parsed location details
-            if "parsed_location" in payload:
-                loc = payload["parsed_location"]
-                print(f"Parsed location details:")
-                print(f"   City: {loc.get('city', 'N/A')}")
-                print(f"   State: {loc.get('state', 'N/A')}")
-                print(f"   Country: {loc.get('country', 'N/A')}")
-                print(f"   Address: {loc.get('address', 'N/A')}")
-                print(f"   Details: {loc.get('location_details', 'N/A')}")
-
-            # Ensure the sanitized address persists as the primary address field
-            # This takes precedence over parsed_location.address for consistency
             payload["address"] = sanitized_address
             
-            print(f"Final address: {payload.get('address', 'N/A')}")
-            
             # Step 9: Check sufficiency
-            print("\nChecking payload sufficiency...")
             is_sufficient = sufficiency(payload)
             if not is_sufficient:
-                print("Article payload insufficient")
-                print(f"   Required fields: title, date, url, coordinates, category, publisher")
-                print(f"   Available fields: {list(payload.keys())}")
+                print(f"✗ [{i}/{len(records)}] Skipped: Insufficient payload - {rec.title[:50]}")
                 ignored += 1
                 continue
-            print("Payload is sufficient")
             
             # Step 10: Persist article
-            print("\nPersisting article...")
             persist(payload)
-            print("Article successfully added!")
+            print(f"✓ [{i}/{len(records)}] Added: {rec.title[:50]}")
             accepted += 1
             
-            # Show final payload summary
-            print(f"\nFinal payload summary:")
-            print(f"   Title: {payload.get('title', 'N/A')[:50]}...")
-            print(f"   Date: {payload.get('date', 'N/A')}")
-            print(f"   Category: {payload.get('category', 'N/A')}")
-            print(f"   Publisher: {payload.get('publisher', 'N/A')}")
-            print(f"   Address: {payload.get('address', 'N/A')}")
-            print(f"   Coordinates: {payload.get('coordinates', 'N/A')}")
-            
         except Exception as e:
-            print(f"Error processing article: {e}")
-            import traceback
-            print(f"Full error details:")
-            traceback.print_exc()
+            print(f"✗ [{i}/{len(records)}] Error: {str(e)[:100]} - {rec.title[:50]}")
             ignored += 1
             continue
-        
-        # Progress update
-        print(f"\nProgress: {accepted} accepted, {ignored} ignored")
-
     
-    print("\n" + "=" * 80)
-    print(f"Processing complete!")
-    print(f"Accepted: {accepted} articles")
-    print(f"Ignored: {ignored} articles")
-    print(f"Success rate: {accepted/(accepted+ignored)*100:.1f}%" if (accepted+ignored) > 0 else "No articles processed")
-    
+    print(f"\nBatch complete: {accepted} added, {ignored} skipped")
     return accepted, ignored
 
 def process_api_articles(
     max_articles: int = 10,
     *,
     # Inject the tool chain so tests can monkey-patch
-    fetch_text: ToolFunc = getText,
-    relevance:  ToolFunc = judgeRelevance,
-    extract_addr: ToolFunc = extractAddressFromText,
-    sanitize_addr: ToolFunc = sanitize_address,
-    tag_coords: ToolFunc = geoTag,
-    classify:   ToolFunc = categorize,
-    canonical_pub: ToolFunc = addPublisher,
+    fetch_text: ToolFunc = fast_getText,
+    relevance:  ToolFunc = fast_judgeRelevance,
+    extract_addr: ToolFunc = fast_extractAddressFromText,
+    sanitize_addr: ToolFunc = fast_sanitize_address,
+    tag_coords: ToolFunc = fast_geoTag,
+    classify:   ToolFunc = fast_categorize,
+    canonical_pub: ToolFunc = fast_addPublisher,
     enrich_addr: ToolFunc = parseAddressInfo,
     sufficiency: ToolFunc = judgeEntrySufficiency,
     persist: ToolFunc = addArticle,
@@ -772,37 +757,15 @@ def process_api_articles(
     """Process articles from API with live status reporting."""
     accepted = ignored = 0
     
-    print(f"Starting ICE Agent - Processing articles from API")
-    print("=" * 80)
-    
     # Get unprocessed articles from API
     try:
         csv_data = getUnprocessedArticles()
-        print(f"Retrieved {len(csv_data)} characters of CSV data from API")
-        
-        # Normalize line endings and clean up the CSV data
         csv_data = csv_data.replace('\r\n', '\n').replace('\r', '\n')
-        
-        # Show full CSV content
-        print("\n" + "="*80)
-        print("RAW CSV DATA FROM API:")
-        print("="*80)
-        print(csv_data)
-        print("="*80)
-        
-        # Show CSV structure for debugging
-        lines = csv_data.strip().split('\n')
-        if lines:
-            print(f"CSV has {len(lines)} lines")
-            if len(lines) > 1:
-                print(f"First line (headers): {lines[0]}")
-                print(f"Second line (sample): {lines[1]}")
     except Exception as e:
         print(f"Failed to get unprocessed articles: {e}")
         return 0, 0
     
     if not csv_data.strip():
-        print("No unprocessed articles found")
         return 0, 0
     
     # Process the CSV data
@@ -810,11 +773,9 @@ def process_api_articles(
     records = []
     for row in reader:
         try:
-            # Parse the date string to datetime
             try:
                 date_obj = datetime.strptime(row['date'], '%Y-%m-%d')
             except ValueError:
-                # If date parsing fails, use current date
                 date_obj = datetime.now()
             
             record = CSVRecord(
@@ -825,104 +786,56 @@ def process_api_articles(
             )
             records.append(record)
         except Exception as e:
-            print(f"Error parsing CSV row: {e}")
             continue
     
     if not records:
-        print("No valid articles found in API response")
         return 0, 0
-    
-    # Show parsed records
-    print(f"\nPARSED RECORDS:")
-    print("="*80)
-    for i, record in enumerate(records):
-        print(f"Record {i+1}:")
-        print(f"  Title: {record.title}")
-        print(f"  URL: {record.url}")
-        print(f"  Date: {record.date}")
-        print(f"  Description: {record.description[:100]}..." if record.description else "  Description: (empty)")
-        print()
     
     # Limit to max_articles
     records = records[:max_articles]
-    print(f"Processing {len(records)} articles")
-    print("=" * 80)
     
     for i, rec in enumerate(records, 1):
-        print(f"\n{'='*60}")
-        print(f"Processing article {i}/{len(records)}")
-        print(f"Title: {rec.title}")
-        print(f"Date: {rec.date}")
-        print(f"URL: {rec.url}")
-        print(f"{'='*60}")
-        
         try:
             # Step 1: Fetch article text
-            print("Fetching article text...")
             text = fetch_text(rec.url)
             if not text:
-                print("Failed to fetch article text")
+                print(f"✗ [{i}/{len(records)}] Skipped: Failed to fetch text - {rec.title[:50]}")
                 ignored += 1
-                # Mark as processed even if text fetch failed
-                print("Marking article as processed...")
                 mark_processed(rec.url)
                 continue
-            
-            # Show first 200 characters of text
-            text_preview = text[:200].replace('\n', ' ').strip()
-            print(f"Article text preview: {text_preview}...")
-            print(f"Text length: {len(text)} characters")
             
             # Step 2: Check relevance
-            print("\nChecking relevance...")
             is_relevant = relevance(text)
             if not is_relevant:
-                print("Article not relevant to ICE")
+                print(f"✗ [{i}/{len(records)}] Skipped: Not ICE-relevant - {rec.title[:50]}")
                 ignored += 1
-                # Mark as processed even if not relevant
-                print("Marking article as processed...")
                 mark_processed(rec.url)
                 continue
-            print("Article is ICE-relevant")
             
             # Step 3: Extract address information
-            print("\nExtracting address information...")
             address = extract_addr(text)
             if not address:
-                print("Could not extract address information")
+                print(f"✗ [{i}/{len(records)}] Skipped: No address found - {rec.title[:50]}")
                 ignored += 1
-                # Mark as processed even if no address found
-                print("Marking article as processed...")
                 mark_processed(rec.url)
                 continue
-            print(f"Extracted address: {address}")
             
             # Step 4: Sanitize address
-            print("\nSanitizing address...")
             sanitized_address = sanitize_addr(address, text)
-            print(f"Sanitized address: {sanitized_address}")
             
             # Step 5: Get coordinates from address
-            print(f"\nGetting coordinates for: {sanitized_address}")
             coords = tag_coords(sanitized_address)
             if not coords:
-                print("Could not extract coordinates from address")
+                print(f"✗ [{i}/{len(records)}] Skipped: No coordinates - {rec.title[:50]}")
                 ignored += 1
-                # Mark as processed even if no coordinates found
-                print("Marking article as processed...")
                 mark_processed(rec.url)
                 continue
-            print(f"Coordinates: {coords[0]:.6f}, {coords[1]:.6f}")
             
             # Step 6: Categorize
-            print("\nCategorizing article...")
             category = classify(text)
-            print(f"Category: {category}")
             
             # Step 7: Get publisher
-            print("\nExtracting publisher...")
             publisher = canonical_pub(rec.url)
-            print(f"Publisher: {publisher}")
             
             # Step 8: Build payload
             payload: ArticlePayload = {
@@ -933,90 +846,43 @@ def process_api_articles(
                 "coordinates": {"lat": coords[0], "lon": coords[1]},
                 "category":   category,
                 "publisher":  publisher,
-                "address":    sanitized_address,  # Store the sanitized address
+                "address":    sanitized_address,
             }
             
             # Enrich with parsed location information
             payload = enrich_addr(payload)
-
-            # Show parsed location details
-            if "parsed_location" in payload:
-                loc = payload["parsed_location"]
-                print(f"Parsed location details:")
-                print(f"   City: {loc.get('city', 'N/A')}")
-                print(f"   State: {loc.get('state', 'N/A')}")
-                print(f"   Country: {loc.get('country', 'N/A')}")
-                print(f"   Address: {loc.get('address', 'N/A')}")
-                print(f"   Details: {loc.get('location_details', 'N/A')}")
-
-            # Ensure the sanitized address persists as the primary address field
-            # This takes precedence over parsed_location.address for consistency
             payload["address"] = sanitized_address
             
-            print(f"Final address: {payload.get('address', 'N/A')}")
-            
             # Step 9: Check sufficiency
-            print("\nChecking payload sufficiency...")
             is_sufficient = sufficiency(payload)
             if not is_sufficient:
-                print("Article payload insufficient")
-                print(f"   Required fields: title, date, url, coordinates, category, publisher")
-                print(f"   Available fields: {list(payload.keys())}")
+                print(f"✗ [{i}/{len(records)}] Skipped: Insufficient payload - {rec.title[:50]}")
                 ignored += 1
-                # Mark as processed even if payload insufficient
-                print("Marking article as processed...")
                 mark_processed(rec.url)
                 continue
-            print("Payload is sufficient")
             
             # Step 10: Persist article
-            print("\nPersisting article...")
             try:
                 persist(payload)
-                print("Article successfully added!")
+                print(f"✓ [{i}/{len(records)}] Added: {rec.title[:50]}")
                 accepted += 1
             except Exception as e:
-                print(f"Failed to persist article: {e}")
+                print(f"✗ [{i}/{len(records)}] Skipped: Failed to persist - {rec.title[:50]}")
                 ignored += 1
             
-            # Step 11: Mark as processed (regardless of success/failure)
-            print("\nMarking article as processed...")
+            # Step 11: Mark as processed
             mark_processed(rec.url)
             
-            # Show final payload summary
-            print(f"\nFinal payload summary:")
-            print(f"   Title: {payload.get('title', 'N/A')[:50]}...")
-            print(f"   Date: {payload.get('date', 'N/A')}")
-            print(f"   Category: {payload.get('category', 'N/A')}")
-            print(f"   Publisher: {payload.get('publisher', 'N/A')}")
-            print(f"   Address: {payload.get('address', 'N/A')}")
-            print(f"   Coordinates: {payload.get('coordinates', 'N/A')}")
-            
         except Exception as e:
-            print(f"Error processing article: {e}")
-            import traceback
-            print(f"Full error details:")
-            traceback.print_exc()
-            
-            # Mark as processed even if there was an error
+            print(f"✗ [{i}/{len(records)}] Error: {str(e)[:100]} - {rec.title[:50]}")
             try:
-                print(f"\nMarking article as processed despite error...")
                 mark_processed(rec.url)
-            except Exception as mark_error:
-                print(f"Failed to mark article as processed: {mark_error}")
-            
+            except:
+                pass
             ignored += 1
             continue
-        
-        # Progress update
-        print(f"\nProgress: {accepted} accepted, {ignored} ignored")
     
-    print("\n" + "=" * 80)
-    print(f"Processing complete!")
-    print(f"Accepted: {accepted} articles")
-    print(f"Ignored: {ignored} articles")
-    print(f"Success rate: {accepted/(accepted+ignored)*100:.1f}%" if (accepted+ignored) > 0 else "No articles processed")
-    
+    print(f"\nBatch complete: {accepted} added, {ignored} skipped")
     return accepted, ignored
 
 def run_continuous_processing(
@@ -1024,13 +890,13 @@ def run_continuous_processing(
     wait_minutes: int = 5,
     *,
     # Inject the tool chain so tests can monkey-patch
-    fetch_text: ToolFunc = getText,
-    relevance:  ToolFunc = judgeRelevance,
-    extract_addr: ToolFunc = extractAddressFromText,
-    sanitize_addr: ToolFunc = sanitize_address,
-    tag_coords: ToolFunc = geoTag,
-    classify:   ToolFunc = categorize,
-    canonical_pub: ToolFunc = addPublisher,
+    fetch_text: ToolFunc = fast_getText,
+    relevance:  ToolFunc = fast_judgeRelevance,
+    extract_addr: ToolFunc = fast_extractAddressFromText,
+    sanitize_addr: ToolFunc = fast_sanitize_address,
+    tag_coords: ToolFunc = fast_geoTag,
+    classify:   ToolFunc = fast_categorize,
+    canonical_pub: ToolFunc = fast_addPublisher,
     enrich_addr: ToolFunc = parseAddressInfo,
     sufficiency: ToolFunc = judgeEntrySufficiency,
     persist: ToolFunc = addArticle,
@@ -1141,13 +1007,13 @@ def process_stream(
     csv_blob: str,
     *,
     # Inject the tool chain so tests can monkey-patch
-    fetch_text: ToolFunc = getText,
-    relevance:  ToolFunc = judgeRelevance,
-    extract_addr: ToolFunc = extractAddressFromText,
-    sanitize_addr: ToolFunc = sanitize_address,
-    tag_coords: ToolFunc = geoTag,
-    classify:   ToolFunc = categorize,
-    canonical_pub: ToolFunc = addPublisher,
+    fetch_text: ToolFunc = fast_getText,
+    relevance:  ToolFunc = fast_judgeRelevance,
+    extract_addr: ToolFunc = fast_extractAddressFromText,
+    sanitize_addr: ToolFunc = fast_sanitize_address,
+    tag_coords: ToolFunc = fast_geoTag,
+    classify:   ToolFunc = fast_categorize,
+    canonical_pub: ToolFunc = fast_addPublisher,
     enrich_addr: ToolFunc = parseAddressInfo,
     sufficiency: ToolFunc = judgeEntrySufficiency,
     persist: ToolFunc = addArticle,

@@ -125,128 +125,87 @@ function App() {
 
     // Load arrest data asynchronously
     useEffect(() => {
-        const loadArrestData = async () => {
-            console.log('🔄 Starting to load arrest data from API...');
-            setDataLoadingStatus(prev => ({ ...prev, arrestData: true }));
-            try {
-                console.log('📡 Fetching from API endpoint: https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV');
-                const response = await fetch('https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV');
-
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                console.log('✅ API response received, status:', response.status);
-                const rawText = await response.text();
-                console.log('📄 Raw response length:', rawText.length, 'characters');
-
-                let csvText;
-                try {
-                    console.log('🔍 Attempting to parse as JSON...');
-                    // Try to parse as JSON (API returns JSON with base64 body)
-                    const data = JSON.parse(rawText);
-                    console.log('📊 Parsed JSON data:', {
-                        statusCode: data.statusCode,
-                        isBase64Encoded: data.isBase64Encoded,
-                        bodyLength: data.body ? data.body.length : 0
-                    });
-
-                    if (data.statusCode !== 200 || !data.isBase64Encoded || !data.body) {
-                        throw new Error('Invalid response format from API');
-                    }
-                    console.log('🔓 Decoding base64 body...');
-                    csvText = base64ToUtf8(data.body);
-                    console.log('📋 Decoded CSV length:', csvText.length, 'characters');
-                } catch (e) {
-                    console.log('⚠️ JSON parsing failed, treating as raw base64:', e.message);
-                    // If not JSON, treat as raw base64-encoded CSV
-                    csvText = base64ToUtf8(rawText.trim());
-                    console.log('📋 Decoded raw CSV length:', csvText.length, 'characters');
-                }
-
-                // Parse CSV with proper handling of quoted fields
-                console.log('🔍 Parsing CSV lines...');
-                const lines = csvText.split('\n');
-                console.log('📊 Total CSV lines:', lines.length);
-
-                if (lines.length === 0) {
-                    throw new Error('No CSV lines found');
-                }
-
-                const headers = parseCSVLine(lines[0]);
-                console.log('📋 CSV headers:', headers);
-
-                const arrestData = lines.slice(1).map((line, index) => {
-                    if (!line.trim()) return null; // Skip empty lines
-                    const values = parseCSVLine(line);
-                    const arrest = {};
-                    headers.forEach((header, index) => {
-                        arrest[header.trim()] = values[index] ? values[index].trim() : '';
-                    });
-
-                    // Extract latitude and longitude from coordinates field
-                    if (arrest.coordinates) {
-                        try {
-                            // Parse coordinates string like "{'lat': Decimal('38.8860434'), 'lon': Decimal('-76.999525')}"
-                            const coordMatch = arrest.coordinates.match(/'lat':\s*Decimal\('([^']+)'\),\s*'lon':\s*Decimal\('([^']+)'\)/);
-                            if (coordMatch) {
-                                arrest.latitude = coordMatch[1];
-                                arrest.longitude = coordMatch[2];
-                            } else {
-                                // Try alternative format
-                                const simpleMatch = arrest.coordinates.match(/lat['"]?\s*:\s*([\d.-]+).*?lon['"]?\s*:\s*([\d.-]+)/);
-                                if (simpleMatch) {
-                                    arrest.latitude = simpleMatch[1];
-                                    arrest.longitude = simpleMatch[2];
-                                }
+        const parseCSVToArrestData = (csvText) => {
+            const lines = csvText.split('\n');
+            if (lines.length === 0) throw new Error('No CSV lines found');
+            const headers = parseCSVLine(lines[0]);
+            const parsedData = lines.slice(1).map((line) => {
+                if (!line.trim()) return null;
+                const values = parseCSVLine(line);
+                const arrest = {};
+                headers.forEach((header, i) => {
+                    arrest[header.trim()] = values[i] ? values[i].trim() : '';
+                });
+                if (arrest.coordinates) {
+                    try {
+                        const coordMatch = arrest.coordinates.match(/'lat':\s*Decimal\('([^']+)'\),\s*'lon':\s*Decimal\('([^']+)'\)/);
+                        if (coordMatch) {
+                            arrest.latitude = coordMatch[1];
+                            arrest.longitude = coordMatch[2];
+                        } else {
+                            const simpleMatch = arrest.coordinates.match(/lat['"]?\s*:\s*([\d.-]+).*?lon['"]?\s*:\s*([\d.-]+)/);
+                            if (simpleMatch) {
+                                arrest.latitude = simpleMatch[1];
+                                arrest.longitude = simpleMatch[2];
                             }
-                        } catch (e) {
-                            console.log('⚠️ Failed to parse coordinates:', arrest.coordinates);
                         }
-                    }
-
-                    return arrest;
-                }).filter(arrest => {
-                    if (!arrest) return false;
-                    const hasLat = arrest.latitude && !isNaN(parseFloat(arrest.latitude));
-                    const hasLng = arrest.longitude && !isNaN(parseFloat(arrest.longitude));
-                    return hasLat && hasLng;
-                });
-
-                // Remove duplicates based on title field
-                const uniqueArrestData = arrestData.filter((arrest, index, self) => {
-                    if (!arrest.title) return true; // Keep records without titles
-                    const firstIndex = self.findIndex(item => item.title === arrest.title);
-                    return index === firstIndex;
-                });
-
-                console.log('✅ Successfully parsed arrest data:', {
-                    totalRecords: arrestData.length,
-                    uniqueRecords: uniqueArrestData.length,
-                    duplicatesRemoved: arrestData.length - uniqueArrestData.length,
-                    sampleRecord: uniqueArrestData[0] || 'No records found'
-                });
-
-                // Debug: Show sample coordinates
-                if (uniqueArrestData.length > 0) {
-                    console.log('📍 Sample coordinates field:', uniqueArrestData[0].coordinates);
-                    console.log('📍 Sample parsed lat/lng:', {
-                        latitude: uniqueArrestData[0].latitude,
-                        longitude: uniqueArrestData[0].longitude
-                    });
+                    } catch (e) { /* ignore */ }
                 }
+                return arrest;
+            }).filter(arrest => {
+                if (!arrest) return false;
+                return arrest.latitude && !isNaN(parseFloat(arrest.latitude)) &&
+                       arrest.longitude && !isNaN(parseFloat(arrest.longitude));
+            });
+            const seen = new Set();
+            return parsedData.filter(a => {
+                const key = a.url || a.title;
+                if (!key) return true;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+        };
 
-                setArrestData(uniqueArrestData);
-                console.log('💾 Arrest data set in state');
-            } catch (error) {
-                console.error('❌ Error loading arrest data:', error);
-                console.error('Error details:', {
-                    message: error.message,
-                    stack: error.stack
-                });
-            } finally {
-                console.log('🏁 Finished loading arrest data');
-                setDataLoadingStatus(prev => ({ ...prev, arrestData: false }));
+        const loadArrestData = async () => {
+            setDataLoadingStatus(prev => ({ ...prev, arrestData: true }));
+            let loaded = false;
+
+            // Try live API first
+            try {
+                const response = await fetch('https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV');
+                if (response.ok) {
+                    const rawText = await response.text();
+                    let csvText;
+                    try {
+                        const data = JSON.parse(rawText);
+                        if (data.statusCode === 200 && data.isBase64Encoded && data.body) {
+                            csvText = base64ToUtf8(data.body);
+                        } else {
+                            throw new Error('bad format');
+                        }
+                    } catch (e) {
+                        csvText = base64ToUtf8(rawText.trim());
+                    }
+                    setArrestData(parseCSVToArrestData(csvText));
+                    loaded = true;
+                }
+            } catch (e) { /* fall through to static fallback */ }
+
+            // Static fallback if API unavailable
+            if (!loaded) {
+                try {
+                    const res = await fetch('/aggregated_incidents.csv');
+                    if (res.ok) {
+                        const csvText = await res.text();
+                        setArrestData(parseCSVToArrestData(csvText));
+                    }
+                } catch (e) {
+                    console.error('Error loading arrest data (fallback):', e.message);
+                }
             }
+
+            setDataLoadingStatus(prev => ({ ...prev, arrestData: false }));
         };
 
         loadArrestData();
@@ -316,21 +275,7 @@ function App() {
     // Show loading indicator only if both datasets are still loading
     const isLoading = dataLoadingStatus.arrestData && dataLoadingStatus.inspectionData;
 
-    // Debug logging for arrest data
-    useEffect(() => {
-        console.log('📊 Current arrest data state:', {
-            arrestDataLength: arrestData.length,
-            isLoading: isLoading,
-            dataLoadingStatus: dataLoadingStatus
-        });
-
-        if (arrestData.length > 0) {
-            console.log('📍 Sample arrest record:', arrestData[0]);
-        }
-    }, [arrestData, isLoading, dataLoadingStatus]);
-
     if (isLoading) {
-        console.log('⏳ Showing loading screen...');
         return (
             <div className="loading">
                 <h2>Loading data...</h2>
@@ -359,6 +304,7 @@ function App() {
             <UnifiedPanel
                 cursorPosition={cursorPosition}
                 arrestData={arrestData}
+                loadingData={dataLoadingStatus.arrestData}
                 onMapClick={mapClickCount}
                 isMobile={isMobile}
                 onPanelStateChange={setIsPanelMinimized}
