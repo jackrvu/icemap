@@ -72,8 +72,11 @@ function parseJSONL(text) {
         .filter(item => item !== null);
 }
 
+const GETCSV_URL = 'https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV';
+
 function App() {
     const [arrestData, setArrestData] = useState([]);
+    const [heatmapPoints, setHeatmapPoints] = useState([]);
     const [inspectionData, setInspectionData] = useState([]);
     const [loading, setLoading] = useState(false); // Changed to false to show map immediately
     const [showModal, setShowModal] = useState(false);
@@ -123,7 +126,7 @@ function App() {
         };
     }, []);
 
-    // Load arrest data asynchronously
+    // Load article data (recent articles for news feed + incidents panel)
     useEffect(() => {
         const parseCSVToArrestData = (csvText) => {
             const lines = csvText.split('\n');
@@ -154,6 +157,8 @@ function App() {
                 return arrest;
             }).filter(arrest => {
                 if (!arrest) return false;
+                const pub = arrest.publisher || '';
+                if (!pub || pub.toLowerCase() === 'unknown') return false;
                 return arrest.latitude && !isNaN(parseFloat(arrest.latitude)) &&
                        arrest.longitude && !isNaN(parseFloat(arrest.longitude));
             });
@@ -167,48 +172,61 @@ function App() {
             });
         };
 
+        const decodeApiResponse = async (response) => {
+            const rawText = await response.text();
+            try {
+                const data = JSON.parse(rawText);
+                if (data.statusCode === 200 && data.isBase64Encoded && data.body) {
+                    return base64ToUtf8(data.body);
+                }
+            } catch (e) { /* not JSON */ }
+            return base64ToUtf8(rawText.trim());
+        };
+
         const loadArrestData = async () => {
             setDataLoadingStatus(prev => ({ ...prev, arrestData: true }));
             let loaded = false;
-
-            // Try live API first
             try {
-                const response = await fetch('https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV');
+                const response = await fetch(GETCSV_URL);
                 if (response.ok) {
-                    const rawText = await response.text();
-                    let csvText;
-                    try {
-                        const data = JSON.parse(rawText);
-                        if (data.statusCode === 200 && data.isBase64Encoded && data.body) {
-                            csvText = base64ToUtf8(data.body);
-                        } else {
-                            throw new Error('bad format');
-                        }
-                    } catch (e) {
-                        csvText = base64ToUtf8(rawText.trim());
-                    }
-                    setArrestData(parseCSVToArrestData(csvText));
+                    setArrestData(parseCSVToArrestData(await decodeApiResponse(response)));
                     loaded = true;
                 }
-            } catch (e) { /* fall through to static fallback */ }
+            } catch (e) { /* fall through */ }
 
-            // Static fallback if API unavailable
             if (!loaded) {
                 try {
                     const res = await fetch('/aggregated_incidents.csv');
-                    if (res.ok) {
-                        const csvText = await res.text();
-                        setArrestData(parseCSVToArrestData(csvText));
-                    }
-                } catch (e) {
-                    console.error('Error loading arrest data (fallback):', e.message);
-                }
+                    if (res.ok) setArrestData(parseCSVToArrestData(await res.text()));
+                } catch (e) { console.error('Error loading arrest data (fallback):', e.message); }
             }
-
             setDataLoadingStatus(prev => ({ ...prev, arrestData: false }));
         };
 
+        // Load full historical heatmap points (all articles, just lat/lng)
+        const loadHeatmapPoints = async () => {
+            try {
+                const response = await fetch(`${GETCSV_URL}?type=heatmap`);
+                if (response.ok) {
+                    const rawText = await response.text();
+                    let points;
+                    try {
+                        const data = JSON.parse(rawText);
+                        if (data.statusCode === 200 && data.isBase64Encoded && data.body) {
+                            points = JSON.parse(base64ToUtf8(data.body));
+                        } else {
+                            points = data;
+                        }
+                    } catch (e) {
+                        points = JSON.parse(base64ToUtf8(rawText.trim()));
+                    }
+                    if (Array.isArray(points)) setHeatmapPoints(points);
+                }
+            } catch (e) { /* heatmap is non-critical, silently skip */ }
+        };
+
         loadArrestData();
+        loadHeatmapPoints();
     }, []);
 
     // Load inspection data asynchronously
@@ -311,6 +329,7 @@ function App() {
             />
             <MapComponent
                 arrestData={arrestData}
+                heatmapPoints={heatmapPoints}
                 inspectionData={inspectionData}
                 onCursorMove={handleCursorMove}
                 onMapClick={handleMapClick}

@@ -1,1 +1,5 @@
-
+requests>=2.31.0
+newspaper3k>=0.2.8
+python-dotenv>=1.0.0
+boto3>=1.34.0
+lxml[html_clean]

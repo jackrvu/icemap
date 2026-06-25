@@ -73,31 +73,33 @@ try {
 }
 
 // Heat map layer component
-function HeatMapLayer({ arrestData, enabled = true }) {
+// heatmapPoints: [[lat, lng], ...] pre-fetched from API — uses arrestData as fallback
+function HeatMapLayer({ arrestData, heatmapPoints, enabled = true }) {
     const map = useMap();
     const heatLayerRef = useRef(null);
 
     useEffect(() => {
-        if (!arrestData || arrestData.length === 0 || !enabled) {
+        const hasHeatmap = heatmapPoints && heatmapPoints.length > 0;
+        const hasArrests = arrestData && arrestData.length > 0;
+        if ((!hasHeatmap && !hasArrests) || !enabled) {
             return;
         }
 
-        // Convert arrest data to points
-        const points = arrestData
-            .map(arrest => ({
-                lat: parseFloat(arrest.latitude),
-                lng: parseFloat(arrest.longitude),
-                data: arrest
-            }))
-            .filter(point => !isNaN(point.lat) && !isNaN(point.lng));
+        // Prefer dedicated heatmap points (full history, just lat/lng)
+        // Fall back to arrestData if heatmap not loaded yet
+        const points = hasHeatmap
+            ? heatmapPoints
+                .map(([lat, lng]) => ({ lat, lng }))
+                .filter(p => !isNaN(p.lat) && !isNaN(p.lng))
+            : arrestData
+                .map(a => ({ lat: parseFloat(a.latitude), lng: parseFloat(a.longitude) }))
+                .filter(p => !isNaN(p.lat) && !isNaN(p.lng));
 
         // Remove existing heat layer
         if (heatLayerRef.current) {
             map.removeLayer(heatLayerRef.current);
         }
 
-        // Create new heat layer with yellow-to-dark-maroon gradient
-        // The pane is now handled directly in the HeatLayer function
         heatLayerRef.current = HeatLayer(points, {
             radius: 25,
             blur: 20,
@@ -119,7 +121,7 @@ function HeatMapLayer({ arrestData, enabled = true }) {
                 map.removeLayer(heatLayerRef.current);
             }
         };
-    }, [arrestData, enabled]); // Remove map dependency
+    }, [arrestData, heatmapPoints, enabled]);
 
     return null;
 }
@@ -212,7 +214,7 @@ function useIsDesktop(threshold = 900) {
     return isDesktop;
 }
 
-function MapComponent({ arrestData, inspectionData, onCursorMove, onMapClick, onInspectionPinClick, showDetentionPins, onToggleDetentionPins }) {
+function MapComponent({ arrestData, heatmapPoints, inspectionData, onCursorMove, onMapClick, onInspectionPinClick, showDetentionPins, onToggleDetentionPins }) {
     const isDesktop = useIsDesktop();
 
 
@@ -255,7 +257,7 @@ function MapComponent({ arrestData, inspectionData, onCursorMove, onMapClick, on
                 />
                 {/* Change the rendering order - first county layer, then heat map layer, then city markers on top */}
                 <CountyCaseHeatMap enabled={true} />
-                <HeatMapLayer arrestData={arrestData} enabled={true} />
+                <HeatMapLayer arrestData={arrestData} heatmapPoints={heatmapPoints} enabled={true} />
                 <ZoomBasedInspectionPins
                     inspectionData={inspectionData}
                     onPinClick={onInspectionPinClick}

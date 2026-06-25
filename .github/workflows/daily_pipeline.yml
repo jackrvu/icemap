@@ -1,0 +1,38 @@
+name: Daily ICEmap Pipeline
+
+on:
+  schedule:
+    - cron: '0 6,18 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests newspaper3k python-dotenv boto3
+
+      - name: Run pipeline (20 minutes)
+        run: |
+          cd $GITHUB_WORKSPACE
+          timeout 1140 python3 -u backend/agent/accelerated_pipeline.py api || true
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+          ARTICLES_API: ${{ secrets.ARTICLES_API }}
+          ARTICLES_API_KEY: ${{ secrets.ARTICLES_API_KEY }}
+          ARTICLES_GET_API: ${{ secrets.ARTICLES_GET_API }}
+          ARTICLES_PROCESS_MARK_API: ${{ secrets.ARTICLES_PROCESS_MARK_API }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-2
