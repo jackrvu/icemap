@@ -86,8 +86,29 @@ _LOCAL_CSV_FIELDS = [
     "street", "city", "id", "title", "county", "summary", "date",
 ]
 
+_S3_BUCKET = os.getenv("S3_BUCKET", "site-articles-bucket")
+_S3_KEY = os.getenv("S3_KEY", "exports/processedArticles.csv")
+_s3_sync_counter = 0
+_S3_SYNC_EVERY = 25  # upload to S3 after every N accepted articles
+
+def _sync_to_s3() -> None:
+    """Upload the local CSV to S3 so the Lambda serves fresh data."""
+    try:
+        import boto3 as _boto3
+        s3 = _boto3.client("s3")
+        s3.upload_file(
+            _LOCAL_CSV_PATH,
+            _S3_BUCKET,
+            _S3_KEY,
+            ExtraArgs={"ContentType": "text/csv"},
+        )
+        print(f"  ↑ Synced {_LOCAL_CSV_PATH} → s3://{_S3_BUCKET}/{_S3_KEY}")
+    except Exception as e:
+        print(f"  ⚠ S3 sync failed (non-fatal): {e}")
+
 def _append_to_local_csv(payload: dict) -> None:
-    """Append a successfully processed article to the static frontend CSV."""
+    """Append a successfully processed article to the static frontend CSV, and periodically sync to S3."""
+    global _s3_sync_counter
     try:
         coords = payload.get("coordinates", {})
         loc = payload.get("parsed_location") or {}
@@ -118,6 +139,9 @@ def _append_to_local_csv(payload: dict) -> None:
                 if write_header:
                     writer.writeheader()
                 writer.writerow(row)
+            _s3_sync_counter += 1
+            if _s3_sync_counter % _S3_SYNC_EVERY == 0:
+                _sync_to_s3()
     except Exception:
         pass  # Never fail the pipeline due to local write errors
 
