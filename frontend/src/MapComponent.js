@@ -140,12 +140,13 @@ function HeatMapLayer({ arrestData, heatmapPoints, enabled = true }) {
             const { points, maxWeight } = binHeatPoints(rawPoints, binSizeForZoom(map.getZoom()));
 
             heatLayerRef.current = HeatLayer(points, {
-                radius: 18,
-                blur: 14,
+                radius: 20,
+                blur: 15,
                 maxZoom: 10,
-                // Slightly below the true max so the busiest metros reach the
-                // deep-red end of the gradient instead of everything sitting yellow
-                max: maxWeight * 0.75,
+                minOpacity: 0.35,
+                // Well below the true max so mid-density areas render in the
+                // orange/red middle of the gradient instead of faint yellow
+                max: maxWeight * 0.45,
                 gradient: {
                     0.0: '#FFFF00',   // Yellow for low intensity
                     0.2: '#FFD700',   // Gold
