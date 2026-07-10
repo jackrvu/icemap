@@ -5,6 +5,7 @@ import './Branding.css';
 import CountyCaseHeatMap from './components/CountyCaseHeatMap';
 import InspectionPins from './components/InspectionPins';
 import CityMarkers from './components/CityMarkers';
+import MapLegend from './components/MapLegend';
 import './components/HeatMapLayer.css';
 
 // Fix for default markers in react-leaflet
@@ -72,6 +73,42 @@ try {
     };
 }
 
+// Aggregate raw points into grid cells and weight each cell by log2(1 + count),
+// so dense metros don't saturate the whole gradient and single articles stay visible.
+function binHeatPoints(points, binSizeDeg) {
+    if (!binSizeDeg) {
+        return { points: points.map(p => [p.lat, p.lng, 1]), maxWeight: 1 };
+    }
+    const bins = new Map();
+    for (const p of points) {
+        const key = `${Math.round(p.lat / binSizeDeg)},${Math.round(p.lng / binSizeDeg)}`;
+        const bin = bins.get(key);
+        if (bin) {
+            bin.latSum += p.lat;
+            bin.lngSum += p.lng;
+            bin.count += 1;
+        } else {
+            bins.set(key, { latSum: p.lat, lngSum: p.lng, count: 1 });
+        }
+    }
+    let maxWeight = 1;
+    const out = [];
+    for (const b of bins.values()) {
+        const w = Math.log2(1 + b.count);
+        if (w > maxWeight) maxWeight = w;
+        out.push([b.latSum / b.count, b.lngSum / b.count, w]);
+    }
+    return { points: out, maxWeight };
+}
+
+// Bin coarser when zoomed out, finer when zoomed in, raw points past zoom 8
+function binSizeForZoom(zoom) {
+    if (zoom <= 5) return 0.4;
+    if (zoom <= 6) return 0.2;
+    if (zoom <= 8) return 0.08;
+    return 0;
+}
+
 // Heat map layer component
 // heatmapPoints: [[lat, lng], ...] pre-fetched from API — uses arrestData as fallback
 function HeatMapLayer({ arrestData, heatmapPoints, enabled = true }) {
@@ -87,7 +124,7 @@ function HeatMapLayer({ arrestData, heatmapPoints, enabled = true }) {
 
         // Prefer dedicated heatmap points (full history, just lat/lng)
         // Fall back to arrestData if heatmap not loaded yet
-        const points = hasHeatmap
+        const rawPoints = hasHeatmap
             ? heatmapPoints
                 .map(([lat, lng]) => ({ lat, lng }))
                 .filter(p => !isNaN(p.lat) && !isNaN(p.lng))
@@ -95,28 +132,38 @@ function HeatMapLayer({ arrestData, heatmapPoints, enabled = true }) {
                 .map(a => ({ lat: parseFloat(a.latitude), lng: parseFloat(a.longitude) }))
                 .filter(p => !isNaN(p.lat) && !isNaN(p.lng));
 
-        // Remove existing heat layer
-        if (heatLayerRef.current) {
-            map.removeLayer(heatLayerRef.current);
-        }
-
-        heatLayerRef.current = HeatLayer(points, {
-            radius: 25,
-            blur: 20,
-            maxZoom: 10,
-            gradient: {
-                0.0: '#FFFF00',   // Yellow for low intensity
-                0.2: '#FFD700',   // Gold
-                0.4: '#FF8C00',   // Dark orange
-                0.6: '#DC143C',   // Crimson
-                0.8: '#B22222',   // Fire brick
-                1.0: '#8B0000'    // Dark maroon for high intensity
+        const render = () => {
+            if (heatLayerRef.current) {
+                map.removeLayer(heatLayerRef.current);
             }
-        });
 
-        map.addLayer(heatLayerRef.current);
+            const { points, maxWeight } = binHeatPoints(rawPoints, binSizeForZoom(map.getZoom()));
+
+            heatLayerRef.current = HeatLayer(points, {
+                radius: 18,
+                blur: 14,
+                maxZoom: 10,
+                // Slightly below the true max so the busiest metros reach the
+                // deep-red end of the gradient instead of everything sitting yellow
+                max: maxWeight * 0.75,
+                gradient: {
+                    0.0: '#FFFF00',   // Yellow for low intensity
+                    0.2: '#FFD700',   // Gold
+                    0.4: '#FF8C00',   // Dark orange
+                    0.6: '#DC143C',   // Crimson
+                    0.8: '#B22222',   // Fire brick
+                    1.0: '#8B0000'    // Dark maroon for high intensity
+                }
+            });
+
+            map.addLayer(heatLayerRef.current);
+        };
+
+        render();
+        map.on('zoomend', render);
 
         return () => {
+            map.off('zoomend', render);
             if (heatLayerRef.current) {
                 map.removeLayer(heatLayerRef.current);
             }
@@ -214,7 +261,14 @@ function useIsDesktop(threshold = 900) {
     return isDesktop;
 }
 
-function MapComponent({ arrestData, heatmapPoints, inspectionData, onCursorMove, onMapClick, onInspectionPinClick, showDetentionPins, onToggleDetentionPins }) {
+const TIME_RANGES = [
+    { value: '7', label: '7d' },
+    { value: '30', label: '30d' },
+    { value: '90', label: '90d' },
+    { value: 'all', label: 'All' },
+];
+
+function MapComponent({ arrestData, heatmapPoints, inspectionData, onCursorMove, onMapClick, onInspectionPinClick, showDetentionPins, onToggleDetentionPins, timeRange, onTimeRangeChange }) {
     const isDesktop = useIsDesktop();
 
 
@@ -245,6 +299,20 @@ function MapComponent({ arrestData, heatmapPoints, inspectionData, onCursorMove,
                     </div>
                 </div>
             )}
+            {onTimeRangeChange && (
+                <div className={`time-range-control ${isDesktop ? 'desktop' : 'mobile'}`}>
+                    {TIME_RANGES.map(r => (
+                        <button
+                            key={r.value}
+                            className={`time-range-button ${timeRange === r.value ? 'active' : ''}`}
+                            onClick={() => onTimeRangeChange(r.value)}
+                        >
+                            {r.label}
+                        </button>
+                    ))}
+                </div>
+            )}
+            <MapLegend isMobile={!isDesktop} />
             <MapContainer
                 center={center}
                 zoom={4}

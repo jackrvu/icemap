@@ -203,8 +203,17 @@ function UnifiedPanel({ cursorPosition, arrestData, loadingData, onMapClick, isM
     const allArticles = useMemo(() => {
         if (!arrestData || arrestData.length === 0) return [];
         const sorted = [...arrestData].sort((a, b) => new Date(b.date) - new Date(a.date));
-        const nonIce = sorted.filter(a => !(a.url && a.url.includes('ice.gov')));
-        const ice = sorted.filter(a => a.url && a.url.includes('ice.gov'));
+        // Collapse syndicated copies of the same story (same headline, different outlet)
+        const seenTitles = new Set();
+        const deduped = sorted.filter(a => {
+            const key = (a.title || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+            if (!key) return true;
+            if (seenTitles.has(key)) return false;
+            seenTitles.add(key);
+            return true;
+        });
+        const nonIce = deduped.filter(a => !(a.url && a.url.includes('ice.gov')));
+        const ice = deduped.filter(a => a.url && a.url.includes('ice.gov'));
         return [...nonIce, ...ice];
     }, [arrestData]);
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import MapComponent from './MapComponent';
 import InfoModal from './InfoModal';
 import DonationModal from './DonationModal';
@@ -88,6 +88,7 @@ function App() {
     const [isMobile, setIsMobile] = useState(false);
     const [showDetentionPins, setShowDetentionPins] = useState(() => !isMobileDevice());
     const [isPanelMinimized, setIsPanelMinimized] = useState(false);
+    const [timeRange, setTimeRange] = useState('all'); // '7' | '30' | '90' | 'all' (days)
     const [dataLoadingStatus, setDataLoadingStatus] = useState({
         arrestData: false,
         inspectionData: false
@@ -290,6 +291,16 @@ function App() {
         setSelectedInspection(null);
     };
 
+    // Filter incidents to the selected time range (map + panel + feed)
+    const filteredArrestData = useMemo(() => {
+        if (timeRange === 'all') return arrestData;
+        const cutoff = Date.now() - parseInt(timeRange) * 24 * 60 * 60 * 1000;
+        return arrestData.filter(a => {
+            const t = new Date(a.date).getTime();
+            return !isNaN(t) && t >= cutoff;
+        });
+    }, [arrestData, timeRange]);
+
     // Show loading indicator only if both datasets are still loading
     const isLoading = dataLoadingStatus.arrestData && dataLoadingStatus.inspectionData;
 
@@ -321,21 +332,23 @@ function App() {
             />
             <UnifiedPanel
                 cursorPosition={cursorPosition}
-                arrestData={arrestData}
+                arrestData={filteredArrestData}
                 loadingData={dataLoadingStatus.arrestData}
                 onMapClick={mapClickCount}
                 isMobile={isMobile}
                 onPanelStateChange={setIsPanelMinimized}
             />
             <MapComponent
-                arrestData={arrestData}
-                heatmapPoints={heatmapPoints}
+                arrestData={filteredArrestData}
+                heatmapPoints={timeRange === 'all' ? heatmapPoints : []}
                 inspectionData={inspectionData}
                 onCursorMove={handleCursorMove}
                 onMapClick={handleMapClick}
                 onInspectionPinClick={handleInspectionPinClick}
                 showDetentionPins={showDetentionPins}
                 onToggleDetentionPins={() => setShowDetentionPins(!showDetentionPins)}
+                timeRange={timeRange}
+                onTimeRangeChange={setTimeRange}
             />
         </div>
     );
