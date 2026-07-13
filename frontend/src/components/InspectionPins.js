@@ -80,6 +80,14 @@ function InspectionPins({ inspectionData, onPinClick, enabled = true }) {
     const map = useMap();
     const markersRef = useRef([]);
 
+    // Keep the click handler in a ref so a new callback identity (App
+    // re-renders on every cursor move) doesn't tear down and rebuild all
+    // ~280 markers.
+    const onPinClickRef = useRef(onPinClick);
+    useEffect(() => {
+        onPinClickRef.current = onPinClick;
+    }, [onPinClick]);
+
     useEffect(() => {
         // Create a pane for inspection pins if it doesn't exist yet
         if (!map.getPane('detentionCenterPane')) {
@@ -169,8 +177,8 @@ function InspectionPins({ inspectionData, onPinClick, enabled = true }) {
 
                 // Add click handler
                 marker.on('click', () => {
-                    if (onPinClick) {
-                        onPinClick(facility);
+                    if (onPinClickRef.current) {
+                        onPinClickRef.current(facility);
                     }
                 });
 
@@ -187,7 +195,7 @@ function InspectionPins({ inspectionData, onPinClick, enabled = true }) {
             });
             markersRef.current = [];
         };
-    }, [inspectionData, map, enabled, onPinClick]);
+    }, [inspectionData, map, enabled]);
 
     return null;
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import MapComponent from './MapComponent';
 import InfoModal from './InfoModal';
 import DonationModal from './DonationModal';
@@ -258,18 +258,20 @@ function App() {
         setShowDonationModal(false);
     };
 
-    const handleCursorMove = (position) => {
+    // Stable identities: these reach InspectionPins, whose markers should
+    // not be rebuilt just because App re-rendered (e.g. on cursor moves).
+    const handleCursorMove = useCallback((position) => {
         setCursorPosition(position);
-    };
+    }, []);
 
-    const handleMapClick = () => {
+    const handleMapClick = useCallback(() => {
         setMapClickCount(prev => prev + 1);
-    };
+    }, []);
 
-    const handleInspectionPinClick = (inspection) => {
+    const handleInspectionPinClick = useCallback((inspection) => {
         setSelectedInspection(inspection);
         setShowInspectionModal(true);
-    };
+    }, []);
 
     const closeInspectionModal = () => {
         setShowInspectionModal(false);
