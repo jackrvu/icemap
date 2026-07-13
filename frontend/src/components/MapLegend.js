@@ -58,7 +58,7 @@ function MapLegend({ isMobile }) {
                 </span>
             </div>
             <div className="map-legend-section map-legend-pin-row">
-                <span className="map-legend-pin" style={{ background: '#8a8a8a', color: '#fff' }}>–</span>
+                <span className="map-legend-pin" style={{ background: '#fb8c00' }}></span>
                 <span className="map-legend-pin-text">
                     No published ODO inspection findings
                 </span>

@@ -6,9 +6,9 @@ import './InspectionPins.css';
 // Objective pin styling: the number shown is the count of deficiencies
 // cited in the facility's most recent substantive ODO inspection (taken
 // directly from the published report). Facilities without published ODO
-// findings are shown as neutral gray pins.
+// findings get a neutral mid-scale orange pin with no number.
 export const getDeficiencyColor = (deficiencies) => {
-    if (deficiencies === null || deficiencies === undefined) return '#8a8a8a';
+    if (deficiencies === null || deficiencies === undefined) return '#fb8c00';
     if (deficiencies === 0) return '#4caf50';   // green: none cited
     if (deficiencies <= 3) return '#ffc107';    // amber
     if (deficiencies <= 7) return '#ff9800';    // orange
@@ -21,7 +21,7 @@ const createInspectionIcon = (deficiencies) => {
     const size = 32; // Fixed size for all pins
     const hasData = deficiencies !== null && deficiencies !== undefined;
     const color = getDeficiencyColor(deficiencies);
-    const label = hasData ? deficiencies : '–';
+    const label = hasData ? deficiencies : '';
 
     // Dark text on the lighter (amber/orange) backgrounds
     const brightness = (hasData && deficiencies > 0 && deficiencies <= 7) ? '#333333' : '#ffffff';
@@ -170,7 +170,7 @@ function InspectionPins({ inspectionData, onPinClick, enabled = true }) {
                 // Add click handler
                 marker.on('click', () => {
                     if (onPinClick) {
-                        onPinClick(inspection);
+                        onPinClick(facility);
                     }
                 });
 

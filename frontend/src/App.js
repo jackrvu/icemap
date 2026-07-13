@@ -72,7 +72,7 @@ function App() {
     const [cursorPosition, setCursorPosition] = useState(null);
     const [mapClickCount, setMapClickCount] = useState(0);
     const [isMobile, setIsMobile] = useState(false);
-    const [showDetentionPins, setShowDetentionPins] = useState(() => !isMobileDevice());
+    const [showDetentionPins, setShowDetentionPins] = useState(false);
     const [isPanelMinimized, setIsPanelMinimized] = useState(false);
     const [timeRange, setTimeRange] = useState('all'); // '7' | '30' | '90' | 'all' (days)
     const [dataLoadingStatus, setDataLoadingStatus] = useState({
