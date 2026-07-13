@@ -50,9 +50,17 @@ function MapLegend({ isMobile }) {
             </div>
 
             <div className="map-legend-section map-legend-pin-row">
-                <span className="map-legend-pin">8</span>
+                <span className="map-legend-pin" style={{ background: '#4caf50', color: '#fff' }}>0</span>
+                <span className="map-legend-pin" style={{ background: '#ff9800' }}>5</span>
+                <span className="map-legend-pin" style={{ background: '#d32f2f', color: '#fff' }}>15</span>
                 <span className="map-legend-pin-text">
-                    Detention center — number is its latest inspection score (10 = best)
+                    Detention facility — number of deficiencies cited in its latest ODO inspection
+                </span>
+            </div>
+            <div className="map-legend-section map-legend-pin-row">
+                <span className="map-legend-pin" style={{ background: '#8a8a8a', color: '#fff' }}>–</span>
+                <span className="map-legend-pin-text">
+                    No published ODO inspection findings
                 </span>
             </div>
         </div>

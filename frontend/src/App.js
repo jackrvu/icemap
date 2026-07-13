@@ -57,27 +57,13 @@ function base64ToUtf8(base64) {
     return new TextDecoder('utf-8').decode(bytes);
 }
 
-// Helper function to parse JSONL file
-function parseJSONL(text) {
-    const lines = text.trim().split('\n');
-    return lines
-        .map(line => {
-            try {
-                return JSON.parse(line);
-            } catch (error) {
-                console.warn('Failed to parse JSONL line:', line);
-                return null;
-            }
-        })
-        .filter(item => item !== null);
-}
-
-const GETCSV_URL = 'https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV';
+const GETCSV_URL ='https://zo8ywjgau3.execute-api.us-east-2.amazonaws.com/default/getCSV';
 
 function App() {
     const [arrestData, setArrestData] = useState([]);
     const [heatmapPoints, setHeatmapPoints] = useState([]);
     const [inspectionData, setInspectionData] = useState([]);
+    const [inspectionMeta, setInspectionMeta] = useState(null);
     const [loading, setLoading] = useState(false); // Changed to false to show map immediately
     const [showModal, setShowModal] = useState(false);
     const [showDonationModal, setShowDonationModal] = useState(false);
@@ -230,12 +216,14 @@ function App() {
         loadHeatmapPoints();
     }, []);
 
-    // Load inspection data asynchronously
+    // Load detention facility data asynchronously.
+    // Name-match validation happens in the pipeline (state-verified), so the
+    // frontend only needs to keep facilities that could be geolocated.
     useEffect(() => {
         const loadInspectionData = async () => {
             setDataLoadingStatus(prev => ({ ...prev, inspectionData: true }));
             try {
-                const inspectionResponse = await fetch('/facilities_with_coordinates_results.jsonl.gz');
+                const inspectionResponse = await fetch('/detention_facilities.json.gz');
 
                 if (!inspectionResponse.ok) {
                     throw new Error(`HTTP error! status: ${inspectionResponse.status}`);
@@ -243,20 +231,17 @@ function App() {
 
                 const compressedData = await inspectionResponse.arrayBuffer();
                 const decompressedData = pako.inflate(compressedData, { to: 'string' });
-                const allInspectionData = parseJSONL(decompressedData);
+                const dataset = JSON.parse(decompressedData);
 
-                // Filter for entries with name_similarity_score > 0.9
-                const filteredInspectionData = allInspectionData.filter(facility =>
-                    facility.name_similarity_score > 0.9 &&
-                    facility.location_latitude &&
-                    facility.location_longitude &&
-                    !isNaN(parseFloat(facility.location_latitude)) &&
-                    !isNaN(parseFloat(facility.location_longitude))
+                const mappableFacilities = (dataset.facilities || []).filter(facility =>
+                    typeof facility.latitude === 'number' &&
+                    typeof facility.longitude === 'number'
                 );
 
-                setInspectionData(filteredInspectionData);
+                setInspectionMeta(dataset.meta || null);
+                setInspectionData(mappableFacilities);
             } catch (error) {
-                console.error('Error loading inspection data:', error);
+                console.error('Error loading detention facility data:', error);
             } finally {
                 setDataLoadingStatus(prev => ({ ...prev, inspectionData: false }));
             }
@@ -320,6 +305,7 @@ function App() {
                 isOpen={showInspectionModal}
                 onClose={closeInspectionModal}
                 inspectionData={selectedInspection}
+                datasetMeta={inspectionMeta}
             />
             <ContactInfo isMobile={isMobile} />
             <ShareButton isMobile={isMobile} />

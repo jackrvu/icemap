@@ -1,53 +1,69 @@
-# Missing Facilities Processor
+# Data Processors
 
-This script processes detention center data to find facilities with low confidence levels and uses the Google Places API to get their coordinates.
+## Detention facility dataset — `build_facility_dataset.py`
 
-## Setup
+Builds `frontend/public/detention_facilities.json.gz`, the dataset behind the
+detention-center pins on the map. Run from the project root:
 
-1. Install dependencies:
 ```bash
-pip install -r requirements.txt
+PYTHONUNBUFFERED=1 python3 backend/processing/data_processors/build_facility_dataset.py
+# flags: --skip-geocode (cache only, no Google calls)
+#        --skip-summaries (no DeepSeek calls; reuse cached summaries)
 ```
 
-2. Set up your Google Places API key:
-   - Get a Google Places API key from the [Google Cloud Console](https://console.cloud.google.com/)
-   - Create a `.env` file in the same directory as the script
-   - Add your API key to the `.env` file:
-   ```
-   GOOGLE_PLACES_API_KEY=your_api_key_here
-   ```
+### Design goals
 
-## Usage
+- **Complete** — the canonical facility list is ICE's own facility-level
+  detention statistics (`data/FY26_detentionStats.xlsx`, "Facilities FY26"
+  sheet, downloaded from https://www.ice.gov/detain/detention-management).
+  All ~203 dedicated facilities appear, plus facilities that only exist in
+  ODO inspection history (closed sites, small county jails).
+- **Accurate** — ODO detention centers are located using the city/state
+  embedded in the inspection PDF URLs (e.g. `pinellasCoJail_ClearwaterFL_…`)
+  as ground truth. Name matches to the official list are rejected unless the
+  states agree. This replaced a pure fuzzy-name match that had pinned
+  Pinellas County Jail (FL) in Rolla, Missouri.
+- **Objective** — the map shows deficiency counts taken directly from the
+  published ODO reports, plus official ICE statistics (average daily
+  population, guaranteed minimum beds, average length of stay, last contract
+  inspection rating). The old LLM-invented 1–10 "quality score" (which was
+  prompted to score facilities 8–10 when data was missing) is gone.
+- **Transparent** — each record carries provenance: which sources it came
+  from, how the name match was made and validated, and geocoding precision
+  (address / facility name / city). Facilities that cannot be located are
+  kept in the dataset and counted in `meta.counts` instead of silently
+  dropped. The dataset `meta` block lists sources and methodology.
 
-Run the script:
-```bash
-python missing_facilities.py
-```
+### Inputs
 
-The script will:
-1. Load the JSONL file with detention center data
-2. Filter records with similarity scores below 0.9
-3. Use Google Places API to find coordinates for each low-confidence facility
-4. Save results to `low_confidence_facilities_results.json`
-5. Display a summary of findings
+| File | Role |
+|------|------|
+| `data/FY26_detentionStats.xlsx` | Official ICE facility statistics (refresh from ice.gov periodically) |
+| `data/distilled_data/merged_by_center.jsonl` | Parsed ODO inspection reports |
+| `data/all_facilities_with_coordinates.csv` | Scraped ice.gov directory (fallback coordinates) |
+| `data/facility_geocode_cache.json` | Google geocode cache (auto-managed) |
+| `data/facility_summaries_cache.json` | DeepSeek summary cache (auto-managed) |
 
-## Output
+Requires `GOOGLE_PLACES_API_KEY` and `DEEPSEEK_API_KEY` in `.env`.
 
-The script generates:
-- Console output showing progress and results
-- A JSON file with detailed results including:
-  - Original record data
-  - Google Places API results (if found)
-  - Status (found/not found)
+AI summaries are generated with a strictly factual prompt (counts, dates,
+standards only; no speculation, no inference from missing data, no scores)
+and are labeled as AI-generated in the UI.
 
-## Configuration
+### Refreshing the data
 
-You can modify the script to:
-- Change the similarity score threshold (currently 0.9)
-- Adjust the output file name
-- Modify the data file path
-- Add additional search parameters
+1. Download the latest detention statistics workbook from
+   https://www.ice.gov/detain/detention-management and save it as
+   `data/FY26_detentionStats.xlsx` (update the filename/sheet constants in
+   the script when a new fiscal year starts).
+2. Re-run the ODO scraping/parsing pipeline if new inspection reports are
+   expected (updates `merged_by_center.jsonl`).
+3. Run `build_facility_dataset.py`. Geocodes and summaries are cached, so
+   incremental runs are fast and only new facilities cost API calls.
 
-## API Rate Limits
+## Superseded scripts
 
-The script includes a small delay between API calls to avoid hitting rate limits. If you encounter rate limit issues, you can increase the delay in the `time.sleep(0.1)` call. 
+`missing_facilities.py`, `facility_merge.py`, `summary_generator.py`, and
+`../compress_facilities_data.py` were the previous pipeline for
+`facilities_with_coordinates_results.jsonl.gz`. They are kept for reference
+but are no longer used; `build_facility_dataset.py` replaces all of them.
