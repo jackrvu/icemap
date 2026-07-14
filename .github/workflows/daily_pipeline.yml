@@ -19,13 +19,24 @@ jobs:
         with:
           python-version: '3.11'
 
+      # lxml_html_clean: lxml 5.x moved lxml.html.clean out of core; without it
+      # `from newspaper import Article` raises ImportError and the pipeline
+      # dies at import time.
       - name: Install dependencies
-        run: pip install requests newspaper3k python-dotenv boto3
+        run: pip install requests newspaper3k lxml_html_clean python-dotenv boto3
 
       - name: Run pipeline (20 minutes)
         run: |
           cd $GITHUB_WORKSPACE
-          timeout 1140 python3 -u backend/agent/accelerated_pipeline.py api || true
+          set +e
+          timeout 1140 python3 -u backend/agent/accelerated_pipeline.py api 2>&1 | tee pipeline.log
+          code=${PIPESTATUS[0]}
+          set -e
+          # 124 = killed by timeout after running the full 20 minutes (expected).
+          if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
+            echo "::error::Pipeline exited with code $code before the timeout — startup crash or fatal error."
+            exit "$code"
+          fi
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
@@ -36,3 +47,32 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-2
+          # The pipeline's periodic S3 sync would overwrite the full DynamoDB
+          # export with this checkout's stale aggregated_incidents.csv.
+          # Articles persist to DynamoDB via addArticle; the hourly
+          # articlesToCSV Lambda regenerates the export.
+          ICE_DISABLE_S3_SYNC: "1"
+
+      # Catch the failure mode where the pipeline "runs" but accepts nothing
+      # (e.g. exhausted LLM quota silently classifying everything as
+      # not_relevant, as happened in June 2026). Normal acceptance is ~30%.
+      - name: Verify articles were processed
+        run: |
+          cd $GITHUB_WORKSPACE
+          if grep -q "No unprocessed articles" pipeline.log; then
+            echo "Queue was empty — nothing to process. OK."
+            exit 0
+          fi
+          totals=$(grep "Running totals:" pipeline.log | tail -1)
+          echo "Last totals line: ${totals:-<none>}"
+          accepted=$(echo "$totals" | sed -E 's/.*Running totals: ([0-9]+) accepted.*/\1/')
+          processed=$(echo "$totals" | sed -E 's/.*accepted, ([0-9]+) ignored.*/\1/')
+          if [ -z "$totals" ]; then
+            echo "::error::Pipeline produced no batch results — it likely crashed mid-run. Check the log above."
+            exit 1
+          fi
+          if [ "$accepted" = "0" ] && [ "${processed:-0}" -ge 100 ]; then
+            echo "::error::0 of $processed articles accepted — the LLM step is likely failing silently (check OpenAI quota)."
+            exit 1
+          fi
+          echo "Accepted $accepted articles this run."

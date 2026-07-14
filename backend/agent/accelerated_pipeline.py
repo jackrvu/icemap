@@ -92,7 +92,16 @@ _s3_sync_counter = 0
 _S3_SYNC_EVERY = 25  # upload to S3 after every N accepted articles
 
 def _sync_to_s3() -> None:
-    """Upload the local CSV to S3 so the Lambda serves fresh data."""
+    """Upload the local CSV to S3 so the Lambda serves fresh data.
+
+    WARNING: this replaces the full DynamoDB export at exports/processedArticles.csv
+    with the (much smaller) local aggregated_incidents.csv. Articles are already
+    persisted to DynamoDB via addArticle, and the hourly articlesToCSV Lambda
+    regenerates the export from DynamoDB — so environments that don't want the
+    export clobbered (e.g. GitHub Actions) must set ICE_DISABLE_S3_SYNC=1.
+    """
+    if os.getenv("ICE_DISABLE_S3_SYNC") == "1":
+        return
     try:
         import boto3 as _boto3
         s3 = _boto3.client("s3")
